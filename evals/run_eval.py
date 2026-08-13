@@ -170,7 +170,7 @@ def run_case(case: dict[str, Any], settings: Settings) -> CaseResult:
     # sentence. That is the guarantee this project makes, so it is measured.
     if run.is_answer and run.answer_audit is not None:
         audit = run.answer_audit
-        result.cited_sentences = audit.total_cited
+        result.cited_sentences = audit.cited_sentences
         result.fabricated_citations = len(audit.fabricated_citations)
         checks["no_fabricated_citations"] = not audit.fabricated_citations
         if audit.total_cited:
@@ -180,8 +180,8 @@ def run_case(case: dict[str, Any], settings: Settings) -> CaseResult:
             # `is_clean` is trivially true for an answer that cites nothing,
             # so requiring a clean audit must also require something to audit.
             # Otherwise the strictest check in the suite passes vacuously.
-            checks["clean_audit"] = audit.is_clean and audit.total_cited > 0
-            if not audit.total_cited:
+            checks["clean_audit"] = audit.is_clean and audit.cited_sentences > 0
+            if not audit.cited_sentences:
                 result.notes.append("answer contained no verifiable citations")
 
     result.passed = all(checks.values()) if checks else False

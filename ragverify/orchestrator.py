@@ -848,7 +848,7 @@ class AdaptiveResearcher:
             if audit.is_clean or attempt == 1:
                 break
 
-            if not audit.total_cited and grounding.supported:
+            if not audit.cited_sentences and grounding.supported:
                 # An answer that cites nothing cannot be verified at all. It
                 # is the least trustworthy output the pipeline can emit and
                 # the easiest to mistake for a good one.
@@ -862,7 +862,7 @@ class AdaptiveResearcher:
 
         if audit is not None and (
             (audit.total_cited and audit.verified_rate < 0.5)
-            or (not audit.total_cited and grounding.supported)
+            or (not audit.cited_sentences and grounding.supported)
         ):
             # Two attempts produced text the evidence does not support. Falling
             # back to a deterministic rendering of the verified claims is the

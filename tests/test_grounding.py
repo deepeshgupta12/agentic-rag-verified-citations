@@ -234,3 +234,42 @@ class TestValueNormalization:
             [item],
         )
         assert len(report.unsupported) == 1, "a transposed figure must still fail"
+
+    def test_all_disclosure_answer_counts_as_cited(self):
+        """An honest "the sources don't say" answer does cite its sources.
+
+        `total_cited` excludes disclosures because they cannot be verified by
+        overlap. Using it to answer "did the answer cite anything?" made an
+        all-disclosure answer read as uncited, triggering regeneration it did
+        not need — and penalising exactly the response an unanswerable
+        question should get.
+        """
+        from ragverify.grounding import verify_answer
+
+        audit = verify_answer(
+            "The 2027 forecast is not provided in the corpus [S1].\n"
+            "Industry benchmarks are not available in these sources [S1].",
+            SOURCES,
+        )
+        assert audit.cited_sentences == 2, "both sentences carry a citation"
+        assert audit.total_cited == 0, "neither makes a verifiable assertion"
+        assert audit.is_clean
+
+    def test_genuinely_uncited_answer_is_still_rejected(self):
+        from ragverify.grounding import verify_answer
+
+        audit = verify_answer("Revenue grew substantially over the period.", SOURCES)
+        assert audit.cited_sentences == 0
+        assert not audit.is_clean
+
+    def test_mixed_answer_separates_the_two_counts(self):
+        from ragverify.grounding import verify_answer
+
+        audit = verify_answer(
+            "European revenue grew 34% year over year [S1].\n"
+            "The 2027 forecast is not provided [S1].",
+            SOURCES,
+        )
+        assert audit.cited_sentences == 2
+        assert audit.total_cited == 1
+        assert audit.verified_rate == 1.0

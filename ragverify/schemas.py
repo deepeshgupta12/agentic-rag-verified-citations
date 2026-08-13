@@ -221,7 +221,25 @@ class AnswerAudit(BaseModel):
 
     @property
     def total_cited(self) -> int:
+        """Sentences making a *verifiable* assertion -- the rate's denominator.
+
+        Excludes disclosures, which assert an absence and cannot be checked
+        by overlap.
+        """
         return len(self.verified_sentences) + len(self.unverified_sentences)
+
+    @property
+    def cited_sentences(self) -> int:
+        """Sentences carrying a citation at all, disclosures included.
+
+        Distinct from ``total_cited``, and conflating the two is a real bug:
+        an answer whose every cited sentence is a legitimate disclosure has
+        citations but a ``total_cited`` of zero, so it reads as uncited and
+        triggers regeneration it does not need. "Did the answer cite
+        anything?" and "how much of what it asserted verified?" are different
+        questions.
+        """
+        return self.total_cited + len(self.disclosure_sentences)
 
     @property
     def verified_rate(self) -> float:
@@ -233,12 +251,14 @@ class AnswerAudit(BaseModel):
 
         An answer citing nothing is trivially free of failures, so treating
         that as clean would let the least verifiable output pass the
-        strictest gate.
+        strictest gate. Disclosures count as citing: they carry a source and
+        are exactly what an honest answer to an unanswerable question looks
+        like.
         """
         return (
             not self.unverified_sentences
             and not self.fabricated_citations
-            and self.total_cited > 0
+            and self.cited_sentences > 0
         )
 
 
