@@ -412,3 +412,35 @@ class TestSettings:
         import os
 
         assert "OPENAI_API_KEY" not in os.environ
+
+
+class TestDotenv:
+    """`.env` is the documented setup path, so it must actually be read."""
+
+    def test_dotenv_is_loaded(self, tmp_path, monkeypatch):
+        import ragverify.config as config
+
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        (tmp_path / ".env").write_text("OPENAI_API_KEY=sk-from-dotenv\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(config, "_DOTENV_LOADED", False)
+
+        assert Settings.from_env().api_key == "sk-from-dotenv"
+
+    def test_real_env_beats_dotenv(self, tmp_path, monkeypatch):
+        # A stale checked-out .env must never shadow a CI secret.
+        import ragverify.config as config
+
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-from-environ")
+        (tmp_path / ".env").write_text("OPENAI_API_KEY=sk-from-dotenv\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(config, "_DOTENV_LOADED", False)
+
+        assert Settings.from_env().api_key == "sk-from-environ"
+
+    def test_missing_dotenv_is_not_fatal(self, tmp_path, monkeypatch):
+        import ragverify.config as config
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(config, "_DOTENV_LOADED", False)
+        Settings.from_env()  # must not raise

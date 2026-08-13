@@ -37,6 +37,34 @@ DEFAULT_SEARX_ENDPOINTS = (
 )
 
 
+_DOTENV_LOADED = False
+
+
+def _load_dotenv_once() -> None:
+    """Load ``.env`` exactly once per process, if python-dotenv is available.
+
+    Guarded by a module flag rather than relying on ``load_dotenv`` being
+    cheap: Streamlit re-runs the whole script on every interaction, so an
+    unguarded call would re-read the file on each keystroke.
+
+    Failure is silent by design -- ``.env`` is a convenience, and a missing
+    file or a missing optional dependency must not stop settings resolving
+    from real environment variables.
+    """
+    global _DOTENV_LOADED
+    if _DOTENV_LOADED:
+        return
+    _DOTENV_LOADED = True
+    try:
+        from dotenv import find_dotenv, load_dotenv
+
+        # usecwd=True so it is found when invoked from the project root,
+        # which is how the CLI and the eval harness are run.
+        load_dotenv(find_dotenv(usecwd=True), override=False)
+    except Exception:  # noqa: BLE001 - optional convenience, never fatal
+        pass
+
+
 @dataclass(frozen=True)
 class Settings:
     # --- credentials -----------------------------------------------------
@@ -100,9 +128,14 @@ class Settings:
     def from_env(cls, **overrides) -> Settings:
         """Build settings from environment, then apply explicit overrides.
 
+        Reads ``.env`` if present. Real environment variables always win --
+        ``override=False`` -- so an exported key beats a stale file, and CI
+        secrets are never shadowed by a checked-out ``.env``.
+
         Overrides that are ``None`` or empty strings are dropped so a blank
         Streamlit text input does not clobber a value set in ``.env``.
         """
+        _load_dotenv_once()
         env_endpoints = os.getenv("RAGVERIFY_SEARX_ENDPOINTS", "")
         base = cls(
             api_key=os.getenv("OPENAI_API_KEY", ""),
