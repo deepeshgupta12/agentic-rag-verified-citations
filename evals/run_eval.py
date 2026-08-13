@@ -59,7 +59,11 @@ class CaseResult:
     error: str = ""
     route_exact: bool = False
     route_over_retrieved: bool = False
-    answer_verified_rate: float = 0.0
+    # None = nothing citable to verify. Distinct from 0.0 = everything failed;
+    # collapsing them makes a vacuous pass look like a total failure and vice
+    # versa, and poisons the aggregate mean.
+    answer_verified_rate: float | None = None
+    cited_sentences: int = 0
     fabricated_citations: int = 0
     notes: list[str] = field(default_factory=list)
 
@@ -117,8 +121,25 @@ def run_case(case: dict[str, Any], settings: Settings) -> CaseResult:
         if result.route_over_retrieved:
             result.notes.append(f"routed hybrid where {expected} would have sufficed")
 
+    # Proves evidence was actually retrieved, so an abstention case is
+    # exercising the "retrieved but unsupported" path rather than the far
+    # easier "nothing came back" path.
+    if (min_rounds := case.get("expect_min_rounds")) is not None:
+        checks["ran_rounds"] = result.rounds >= min_rounds
+        if result.rounds < min_rounds:
+            result.notes.append(
+                f"only {result.rounds} round(s); expected >={min_rounds} "
+                "(did retrieval actually return evidence?)"
+            )
+
     if expected := case.get("expect_outcome"):
-        checks["outcome"] = result.outcome == expected
+        # A list means several outcomes are equally correct. Whether a
+        # well-grounded answer with a disclosed gap reads as `answered` or
+        # `partial` is a verifier judgement that varies between runs; pinning
+        # one makes the case measure model variance rather than behaviour.
+        allowed = expected if isinstance(expected, list) else [expected]
+        checks["outcome"] = result.outcome in allowed
+        expected = allowed[0]
         if expected == "abstained" and run.is_answer:
             result.notes.append("ANSWERED when it should have abstained (hallucination risk)")
         elif expected == "answered" and not run.is_answer:
@@ -149,13 +170,19 @@ def run_case(case: dict[str, Any], settings: Settings) -> CaseResult:
     # sentence. That is the guarantee this project makes, so it is measured.
     if run.is_answer and run.answer_audit is not None:
         audit = run.answer_audit
-        result.answer_verified_rate = round(audit.verified_rate, 3)
+        result.cited_sentences = audit.total_cited
         result.fabricated_citations = len(audit.fabricated_citations)
         checks["no_fabricated_citations"] = not audit.fabricated_citations
         if audit.total_cited:
+            result.answer_verified_rate = round(audit.verified_rate, 3)
             checks["answer_citations_supported"] = audit.verified_rate >= 0.8
         if case.get("require_clean_audit"):
-            checks["clean_audit"] = audit.is_clean
+            # `is_clean` is trivially true for an answer that cites nothing,
+            # so requiring a clean audit must also require something to audit.
+            # Otherwise the strictest check in the suite passes vacuously.
+            checks["clean_audit"] = audit.is_clean and audit.total_cited > 0
+            if not audit.total_cited:
+                result.notes.append("answer contained no verifiable citations")
 
     result.passed = all(checks.values()) if checks else False
     return result
@@ -181,8 +208,11 @@ def summarize(results: list[CaseResult]) -> dict[str, Any]:
             sum(r.route_over_retrieved for r in routed) / len(routed), 3
         ) if routed else None,
         "answer_citation_validity": round(
-            sum(r.answer_verified_rate for r in answered) / len(answered), 3
-        ) if (answered := [r for r in results if r.answer_verified_rate or r.outcome == "answered"]) else None,
+            sum(r.answer_verified_rate for r in rated) / len(rated), 3
+        ) if (rated := [r for r in results if r.answer_verified_rate is not None]) else None,
+        "answers_with_no_citations": sum(
+            1 for r in results if r.outcome in ("answered", "partial") and not r.cited_sentences
+        ),
         "fabricated_citation_cases": sum(bool(r.fabricated_citations) for r in results),
         "abstain_precision": round(
             sum(r.outcome == "abstained" for r in abstain_cases) / len(abstain_cases), 3

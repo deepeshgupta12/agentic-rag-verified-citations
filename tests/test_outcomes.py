@@ -7,6 +7,7 @@ supports one. These are the paths that let it decline instead.
 from __future__ import annotations
 
 from test_orchestrator import (
+    CITED_ANSWER,
     GOOD_DRAFT,
     QUESTION,
     FakeLLM,
@@ -61,7 +62,7 @@ class TestAbstention:
     def test_answers_when_grounding_holds(self):
         cfg = settings(max_rounds=1)
         llm = FakeLLM(cfg, [
-            triage(), GOOD_DRAFT, verdict(Verdict.SUFFICIENT, NextAction.ANSWER), "Final.",
+            triage(), GOOD_DRAFT, verdict(Verdict.SUFFICIENT, NextAction.ANSWER), CITED_ANSWER,
         ])
         result = AdaptiveResearcher(cfg, llm, corpus_for(cfg)).run(QUESTION)
         assert result.outcome is Outcome.ANSWERED and result.is_answer
@@ -73,7 +74,7 @@ class TestAbstention:
             draft_answer="Revenue fell 12%.",
         )
         llm = FakeLLM(cfg, [
-            triage(), bad, verdict(Verdict.PARTIAL, NextAction.ANSWER), "Hedged answer.",
+            triage(), bad, verdict(Verdict.PARTIAL, NextAction.ANSWER), CITED_ANSWER,
         ])
         result = AdaptiveResearcher(cfg, llm, corpus_for(cfg)).run(QUESTION)
         assert result.outcome is not Outcome.ABSTAINED
@@ -87,7 +88,7 @@ class TestAbstention:
             verdict(Verdict.INSUFFICIENT, NextAction.WIDEN_LOCAL, gaps=["margin detail"]),
             GOOD_DRAFT,
             verdict(Verdict.INSUFFICIENT, NextAction.WIDEN_LOCAL, gaps=["margin detail"]),
-            "Best effort.",
+            CITED_ANSWER,
         ])
         result = AdaptiveResearcher(cfg, llm, corpus_for(cfg)).run(QUESTION)
         assert result.outcome is Outcome.PARTIAL
@@ -117,7 +118,7 @@ class TestClarify:
             triage(route=Route.CLARIFY),  # no clarifying_question supplied
             GOOD_DRAFT,
             verdict(Verdict.SUFFICIENT, NextAction.ANSWER),
-            "Final.",
+            CITED_ANSWER,
         ])
         result = AdaptiveResearcher(cfg, llm, corpus_for(cfg)).run(QUESTION)
         assert result.outcome is not Outcome.CLARIFY
@@ -129,7 +130,7 @@ class TestClarify:
             triage(route=Route.NO_ANSWER),
             GOOD_DRAFT,
             verdict(Verdict.SUFFICIENT, NextAction.ANSWER),
-            "Final.",
+            CITED_ANSWER,
         ])
         result = AdaptiveResearcher(cfg, llm, corpus_for(cfg)).run(QUESTION)
         assert result.outcome is Outcome.ANSWERED, "a covered corpus makes pre-emptive refusal wrong"
@@ -144,7 +145,7 @@ class TestBudget:
             verdict(Verdict.INSUFFICIENT, NextAction.WIDEN_LOCAL, gaps=["more"]),
             GOOD_DRAFT,
             verdict(Verdict.SUFFICIENT, NextAction.ANSWER),
-            "Final.",
+            CITED_ANSWER,
         ])
         # Only enough call budget for the first round plus synthesis.
         tight = Budget(max_calls=4, max_cost_usd=10.0, max_seconds=600.0)
@@ -158,7 +159,7 @@ class TestBudget:
     def test_budget_snapshot_is_reported(self):
         cfg = settings(max_rounds=1)
         llm = FakeLLM(cfg, [
-            triage(), GOOD_DRAFT, verdict(Verdict.SUFFICIENT, NextAction.ANSWER), "Final.",
+            triage(), GOOD_DRAFT, verdict(Verdict.SUFFICIENT, NextAction.ANSWER), CITED_ANSWER,
         ])
         result = AdaptiveResearcher(cfg, llm, corpus_for(cfg)).run(QUESTION)
         assert result.budget["calls"] == 4
@@ -180,7 +181,7 @@ class TestInjectionInLoop:
         cfg = settings(max_rounds=1, sanitize_sources=True)
         corpus = Corpus([self.POISONED], cfg)
         llm = FakeLLM(cfg, [
-            triage(), GOOD_DRAFT, verdict(Verdict.SUFFICIENT, NextAction.ANSWER), "Final.",
+            triage(), GOOD_DRAFT, verdict(Verdict.SUFFICIENT, NextAction.ANSWER), CITED_ANSWER,
         ])
         result = AdaptiveResearcher(cfg, llm, corpus).run(QUESTION)
 
@@ -192,7 +193,7 @@ class TestInjectionInLoop:
         cfg = settings(max_rounds=1, sanitize_sources=True)
         corpus = Corpus([self.POISONED], cfg)
         llm = FakeLLM(cfg, [
-            triage(), GOOD_DRAFT, verdict(Verdict.SUFFICIENT, NextAction.ANSWER), "Final.",
+            triage(), GOOD_DRAFT, verdict(Verdict.SUFFICIENT, NextAction.ANSWER), CITED_ANSWER,
         ])
         AdaptiveResearcher(cfg, llm, corpus).run(QUESTION)
 
@@ -204,7 +205,7 @@ class TestInjectionInLoop:
         cfg = settings(max_rounds=1, sanitize_sources=False)
         corpus = Corpus([self.POISONED], cfg)
         llm = FakeLLM(cfg, [
-            triage(), GOOD_DRAFT, verdict(Verdict.SUFFICIENT, NextAction.ANSWER), "Final.",
+            triage(), GOOD_DRAFT, verdict(Verdict.SUFFICIENT, NextAction.ANSWER), CITED_ANSWER,
         ])
         result = AdaptiveResearcher(cfg, llm, corpus).run(QUESTION)
         assert not result.injections_detected
@@ -215,7 +216,7 @@ class TestCoverageRouting:
         """Triage must see retrieved passages, not just filenames."""
         cfg = settings()
         llm = FakeLLM(cfg, [
-            triage(), GOOD_DRAFT, verdict(Verdict.SUFFICIENT, NextAction.ANSWER), "Final.",
+            triage(), GOOD_DRAFT, verdict(Verdict.SUFFICIENT, NextAction.ANSWER), CITED_ANSWER,
         ])
         AdaptiveResearcher(cfg, llm, corpus_for(cfg)).run(QUESTION)
 
@@ -228,7 +229,7 @@ class TestCoverageRouting:
     def test_measured_coverage_recorded_on_the_decision(self):
         cfg = settings()
         llm = FakeLLM(cfg, [
-            triage(), GOOD_DRAFT, verdict(Verdict.SUFFICIENT, NextAction.ANSWER), "Final.",
+            triage(), GOOD_DRAFT, verdict(Verdict.SUFFICIENT, NextAction.ANSWER), CITED_ANSWER,
         ])
         result = AdaptiveResearcher(cfg, llm, corpus_for(cfg)).run(QUESTION)
         assert result.triage.measured_coverage is not None
@@ -336,7 +337,7 @@ class TestBudgetIsEnforcedPerCall:
         cfg = settings(max_rounds=3)
         tight = Budget(max_calls=1, max_cost_usd=10.0, max_seconds=600.0)
         llm = FakeLLM(cfg, [
-            triage(), GOOD_DRAFT, verdict(Verdict.SUFFICIENT, NextAction.ANSWER), "Final.",
+            triage(), GOOD_DRAFT, verdict(Verdict.SUFFICIENT, NextAction.ANSWER), CITED_ANSWER,
         ], budget=tight)
         result = AdaptiveResearcher(cfg, llm, corpus_for(cfg), budget=tight).run(QUESTION)
 
@@ -346,7 +347,7 @@ class TestBudgetIsEnforcedPerCall:
     def test_client_and_orchestrator_share_one_budget(self):
         cfg = settings(max_rounds=1)
         llm = FakeLLM(cfg, [
-            triage(), GOOD_DRAFT, verdict(Verdict.SUFFICIENT, NextAction.ANSWER), "Final.",
+            triage(), GOOD_DRAFT, verdict(Verdict.SUFFICIENT, NextAction.ANSWER), CITED_ANSWER,
         ])
         researcher = AdaptiveResearcher(cfg, llm, corpus_for(cfg))
         assert llm.budget is researcher.budget, "two counters means neither sees the whole run"

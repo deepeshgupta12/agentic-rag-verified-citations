@@ -213,6 +213,10 @@ class AnswerAudit(BaseModel):
     # Headings, transitions and disclosure sections carry no citations by
     # design; reported for transparency, not counted as failures.
     uncited_sentences: list[str] = Field(default_factory=list)
+    # Statements that the sources do NOT contain something. Unverifiable by
+    # construction and actively desirable, so excluded from the rate rather
+    # than counted as failures.
+    disclosure_sentences: list[str] = Field(default_factory=list)
     fabricated_citations: list[str] = Field(default_factory=list)
 
     @property
@@ -225,7 +229,17 @@ class AnswerAudit(BaseModel):
 
     @property
     def is_clean(self) -> bool:
-        return not self.unverified_sentences and not self.fabricated_citations
+        """Nothing failed AND something was actually checked.
+
+        An answer citing nothing is trivially free of failures, so treating
+        that as clean would let the least verifiable output pass the
+        strictest gate.
+        """
+        return (
+            not self.unverified_sentences
+            and not self.fabricated_citations
+            and self.total_cited > 0
+        )
 
 
 class RoundRecord(BaseModel):

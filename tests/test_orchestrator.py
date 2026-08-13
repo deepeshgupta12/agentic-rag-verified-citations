@@ -126,6 +126,11 @@ GOOD_DRAFT = draft("European revenue grew 34% year over year", ["S1"])
 
 QUESTION = "How did European revenue change this quarter?"
 
+# Synthesis output must carry a citation: an uncited answer cannot be verified
+# and is now rejected, so a bare "Final." stub no longer represents a
+# successful run.
+CITED_ANSWER = "European revenue grew 34% year over year [S1]."
+
 
 # ---------------------------------------------------------------------------
 # The core regression: the verdict must change behaviour
@@ -139,7 +144,7 @@ class TestVerdictDrivesControlFlow:
             triage(),
             GOOD_DRAFT,
             verdict(Verdict.SUFFICIENT, NextAction.ANSWER),
-            "Final answer.",
+            CITED_ANSWER,
         ])
         result = AdaptiveResearcher(cfg, llm, corpus_for(cfg)).run("How did revenue change?")
 
@@ -156,7 +161,7 @@ class TestVerdictDrivesControlFlow:
             verdict(Verdict.INSUFFICIENT, NextAction.WIDEN_LOCAL, gaps=["Berlin headcount"]),
             draft("The Berlin engineering office reached 412 staff", ["S1"]),
             verdict(Verdict.SUFFICIENT, NextAction.ANSWER),
-            "Final answer.",
+            CITED_ANSWER,
         ])
         result = AdaptiveResearcher(cfg, llm, corpus_for(cfg)).run("Revenue and headcount?")
 
@@ -173,7 +178,7 @@ class TestVerdictDrivesControlFlow:
             verdict(Verdict.INSUFFICIENT, NextAction.WIDEN_LOCAL, gaps=["margin"]),
             GOOD_DRAFT,
             verdict(Verdict.SUFFICIENT, NextAction.ANSWER),
-            "Final.",
+            CITED_ANSWER,
         ])
         result = AdaptiveResearcher(cfg, llm, corpus_for(cfg)).run(QUESTION)
         assert result.rounds[0].top_k == 4
@@ -191,7 +196,7 @@ class TestVerdictDrivesControlFlow:
             ),
             draft("Operating margin was unchanged at 18%", ["S1"]),
             verdict(Verdict.SUFFICIENT, NextAction.ANSWER),
-            "Final.",
+            CITED_ANSWER,
         ])
         question = "How profitable was the quarter?"
         result = AdaptiveResearcher(cfg, llm, corpus_for(cfg)).run(question)
@@ -217,7 +222,7 @@ class TestVerdictDrivesControlFlow:
             verdict(Verdict.INSUFFICIENT, NextAction.WIDEN_LOCAL, gaps=["Berlin office headcount"]),
             GOOD_DRAFT,
             verdict(Verdict.SUFFICIENT, NextAction.ANSWER),
-            "Final.",
+            CITED_ANSWER,
         ])
         AdaptiveResearcher(cfg, llm, corpus).run(QUESTION)
 
@@ -232,7 +237,7 @@ class TestVerdictDrivesControlFlow:
             verdict(Verdict.INSUFFICIENT, NextAction.WIDEN_LOCAL, gaps=["more"]),
             GOOD_DRAFT,
             verdict(Verdict.INSUFFICIENT, NextAction.WIDEN_LOCAL, gaps=["still more"]),
-            "Best-effort answer.",
+            CITED_ANSWER,
         ]
         result = AdaptiveResearcher(cfg, FakeLLM(cfg, never_happy), corpus_for(cfg)).run(QUESTION)
 
@@ -259,7 +264,7 @@ class TestGroundingOverridesVerifier:
             verdict(Verdict.SUFFICIENT, NextAction.ANSWER),  # verifier says ship it
             GOOD_DRAFT,
             verdict(Verdict.SUFFICIENT, NextAction.ANSWER),
-            "Final.",
+            CITED_ANSWER,
         ])
         tracer = Tracer()
         result = AdaptiveResearcher(cfg, llm, corpus_for(cfg), tracer).run(QUESTION)
@@ -272,14 +277,14 @@ class TestGroundingOverridesVerifier:
     def test_high_grounding_yields_high_confidence(self):
         cfg = settings()
         llm = FakeLLM(cfg, [
-            triage(), GOOD_DRAFT, verdict(Verdict.SUFFICIENT, NextAction.ANSWER), "Final.",
+            triage(), GOOD_DRAFT, verdict(Verdict.SUFFICIENT, NextAction.ANSWER), CITED_ANSWER,
         ])
         assert AdaptiveResearcher(cfg, llm, corpus_for(cfg)).run(QUESTION).confidence == "high"
 
     def test_only_cited_sources_are_returned(self):
         cfg = settings(top_k=4)
         llm = FakeLLM(cfg, [
-            triage(), GOOD_DRAFT, verdict(Verdict.SUFFICIENT, NextAction.ANSWER), "Final.",
+            triage(), GOOD_DRAFT, verdict(Verdict.SUFFICIENT, NextAction.ANSWER), CITED_ANSWER,
         ])
         result = AdaptiveResearcher(cfg, llm, corpus_for(cfg)).run(QUESTION)
         assert [c.source_id for c in result.citations] == ["S1"]
@@ -293,7 +298,7 @@ class TestRouting:
             triage(route=Route.WEB),
             GOOD_DRAFT,
             verdict(Verdict.SUFFICIENT, NextAction.ANSWER),
-            "Final.",
+            CITED_ANSWER,
         ])
         result = AdaptiveResearcher(cfg, llm, corpus_for(cfg)).run(QUESTION)
         assert result.rounds[0].route is Route.LOCAL
@@ -334,7 +339,7 @@ class TestResilience:
             LLMError("triage provider 500"),
             GOOD_DRAFT,
             verdict(Verdict.SUFFICIENT, NextAction.ANSWER),
-            "Final.",
+            CITED_ANSWER,
         ])
         result = AdaptiveResearcher(cfg, llm, corpus_for(cfg)).run(QUESTION)
         assert result.final_answer
@@ -346,7 +351,7 @@ class TestResilience:
             triage(),
             GOOD_DRAFT,
             LLMError("verifier down"), LLMError("verifier down"), LLMError("verifier down"),
-            "Final.",
+            CITED_ANSWER,
         ])
         result = AdaptiveResearcher(cfg, llm, corpus_for(cfg)).run(QUESTION)
         assert result.rounds[0].verifier.verdict is Verdict.PARTIAL
@@ -371,7 +376,7 @@ class TestResilience:
     def test_usage_is_accumulated(self):
         cfg = settings()
         llm = FakeLLM(cfg, [
-            triage(), GOOD_DRAFT, verdict(Verdict.SUFFICIENT, NextAction.ANSWER), "Final.",
+            triage(), GOOD_DRAFT, verdict(Verdict.SUFFICIENT, NextAction.ANSWER), CITED_ANSWER,
         ])
         result = AdaptiveResearcher(cfg, llm, corpus_for(cfg)).run(QUESTION)
         assert result.usage.calls == 4
@@ -381,7 +386,7 @@ class TestTrace:
     def test_events_cover_every_stage(self):
         cfg = settings()
         llm = FakeLLM(cfg, [
-            triage(), GOOD_DRAFT, verdict(Verdict.SUFFICIENT, NextAction.ANSWER), "Final.",
+            triage(), GOOD_DRAFT, verdict(Verdict.SUFFICIENT, NextAction.ANSWER), CITED_ANSWER,
         ])
         tracer = Tracer()
         AdaptiveResearcher(cfg, llm, corpus_for(cfg), tracer).run(QUESTION)
@@ -399,7 +404,7 @@ class TestTrace:
             raise RuntimeError("UI thread died")
 
         llm = FakeLLM(cfg, [
-            triage(), GOOD_DRAFT, verdict(Verdict.SUFFICIENT, NextAction.ANSWER), "Final.",
+            triage(), GOOD_DRAFT, verdict(Verdict.SUFFICIENT, NextAction.ANSWER), CITED_ANSWER,
         ])
         result = AdaptiveResearcher(cfg, llm, corpus_for(cfg), Tracer(on_event=explode)).run(QUESTION)
         assert result.final_answer
@@ -423,7 +428,7 @@ class TestSettings:
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         cfg = Settings(api_key="sk-secret")
         llm = FakeLLM(cfg, [triage(), GOOD_DRAFT,
-                            verdict(Verdict.SUFFICIENT, NextAction.ANSWER), "Final."])
+                            verdict(Verdict.SUFFICIENT, NextAction.ANSWER), CITED_ANSWER])
         AdaptiveResearcher(cfg, llm, corpus_for(cfg)).run(QUESTION)
         import os
 

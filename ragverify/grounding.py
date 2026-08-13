@@ -151,7 +151,28 @@ def _normalize_id(cid: str, by_id: dict[str, EvidenceItem]) -> str:
     return cid
 
 
-_SENTENCE = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"'\[])|\n+")
+# Sentence boundaries, with one subtlety that matters a great deal here: a
+# citation following terminal punctuation -- "revenue grew 34%. [S1]" -- belongs
+# to the sentence BEFORE it. Treating "[" as the start of a new sentence orphans
+# every trailing citation, leaving the claim uncited and the bracket stranded as
+# a contentless "sentence" that can never verify. That silently fails correct
+# answers, which is the worst direction for this check to be wrong in.
+_SENTENCE = re.compile(
+    r"(?<=[.!?])\s+(?=[A-Z\"'])"   # ordinary sentence end
+    r"|(?<=\])\s+(?=[A-Z\"'])"     # end of a trailing citation
+    r"|\n+"                        # explicit line breaks
+)
+
+# Statements asserting that the sources do NOT contain something. Unverifiable
+# by construction, and the pipeline is supposed to produce them.
+_ABSENCE = re.compile(
+    r"\b(?:not\s+(?:provided|available|disclosed|stated|mentioned|included|covered|specified|"
+    r"reported|given|found|present)|does\s+not|do\s+not|did\s+not|doesn't|don't|didn't|"
+    r"no\s+(?:forecast|guidance|data|information|figure|mention|estimate|projection|detail)|"
+    r"is\s+not|are\s+not|was\s+not|were\s+not|cannot\s+be|could\s+not\s+be|"
+    r"absent\s+from|silent\s+on|beyond\s+the\s+scope|outside\s+the\s+scope)\b",
+    re.I,
+)
 _INLINE_CITE = re.compile(r"\[([A-Za-z]{1,2}\d{1,3}(?:\s*,\s*[A-Za-z]{1,2}\d{1,3})*)\]")
 
 
@@ -192,6 +213,7 @@ def verify_answer(
     verified: list[str] = []
     unverified: list[str] = []
     uncited: list[str] = []
+    disclosures: list[str] = []
     fabricated: list[str] = []
 
     for raw in _SENTENCE.split(answer):
@@ -219,6 +241,18 @@ def verify_answer(
                 resolved.append(item)
 
         prose = _INLINE_CITE.sub("", sentence)
+
+        # A statement of absence cannot be verified by overlap: a source
+        # cannot contain words confirming what it does not say. Failing these
+        # penalises the pipeline for disclosing its own gaps, which is the
+        # opposite of the incentive this gate exists to create -- it would
+        # push the synthesizer to omit the "what this doesn't cover" section
+        # rather than write one. They are recorded separately and excluded
+        # from the rate.
+        if _ABSENCE.search(prose):
+            disclosures.append(sentence)
+            continue
+
         if resolved and any(claim_support(prose, item.text, threshold)[0] for item in resolved):
             verified.append(sentence)
         else:
@@ -228,6 +262,7 @@ def verify_answer(
         verified_sentences=verified,
         unverified_sentences=unverified,
         uncited_sentences=uncited,
+        disclosure_sentences=disclosures,
         fabricated_citations=sorted(set(fabricated)),
     )
 

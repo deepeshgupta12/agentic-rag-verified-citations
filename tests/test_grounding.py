@@ -93,3 +93,74 @@ class TestStripUnsupported:
         out = strip_unsupported(answer, [Claim(text="The CEO resigned.", citations=[])])
         assert "_[unverified]_" in out
         assert "Revenue grew 34%." in out, "supported text must be untouched"
+
+
+class TestAnswerAudit:
+    """The final answer is re-verified; these pin the parsing edge cases.
+
+    A splitter bug here fails *correct* answers silently, which is the worst
+    direction for this check to be wrong in — it would push the pipeline to
+    discard good output and fall back unnecessarily.
+    """
+
+    def test_trailing_citation_belongs_to_its_sentence(self):
+        from ragverify.grounding import verify_answer
+
+        audit = verify_answer(
+            "- European revenue grew 34% year over year to 2.1 billion euro. [S1]", SOURCES
+        )
+        assert audit.verified_rate == 1.0, "a citation after the period must not be orphaned"
+        assert not audit.unverified_sentences
+
+    def test_two_sentences_each_with_trailing_citations(self):
+        from ragverify.grounding import verify_answer
+
+        audit = verify_answer(
+            "European revenue grew 34% year over year. [S1] "
+            "Berlin headcount reached 412. [S2]",
+            SOURCES,
+        )
+        assert len(audit.verified_sentences) == 2
+
+    def test_fabricated_citation_still_caught(self):
+        from ragverify.grounding import verify_answer
+
+        audit = verify_answer("The CEO resigned in October. [S99]", SOURCES)
+        assert audit.fabricated_citations == ["S99"]
+        assert not audit.is_clean
+
+    def test_absence_statements_are_not_failures(self):
+        """Disclosure must not be penalised.
+
+        A source cannot contain words confirming what it does not say, so
+        failing these would push the synthesizer to omit its own gap
+        disclosures — the opposite of the intended incentive.
+        """
+        from ragverify.grounding import verify_answer
+
+        audit = verify_answer(
+            "European revenue grew 34% year over year. [S1] "
+            "The 2027 forecast is not provided in the source. [S1]",
+            SOURCES,
+        )
+        assert len(audit.disclosure_sentences) == 1
+        assert audit.verified_rate == 1.0
+        assert audit.is_clean
+
+    def test_uncited_answer_is_never_clean(self):
+        """`is_clean` must not pass vacuously on an answer citing nothing."""
+        from ragverify.grounding import verify_answer
+
+        audit = verify_answer("Revenue grew substantially over the period.", SOURCES)
+        assert audit.total_cited == 0
+        assert not audit.is_clean, "nothing to verify is not the same as nothing failed"
+
+    def test_headings_and_tables_are_ignored(self):
+        from ragverify.grounding import verify_answer
+
+        audit = verify_answer(
+            "## Summary\n\n| a | b |\n\n"
+            "European revenue grew 34% year over year. [S1]",
+            SOURCES,
+        )
+        assert audit.verified_rate == 1.0

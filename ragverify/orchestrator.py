@@ -768,19 +768,29 @@ class AdaptiveResearcher:
             if audit.is_clean or attempt == 1:
                 break
 
-            self._warn(
-                f"Final answer failed verification "
-                f"({audit.verified_rate:.0%} of cited sentences supported); regenerating."
-            )
+            if not audit.total_cited and grounding.supported:
+                # An answer that cites nothing cannot be verified at all. It
+                # is the least trustworthy output the pipeline can emit and
+                # the easiest to mistake for a good one.
+                self._warn("Final answer contained no citations; regenerating with sources required.")
+            else:
+                self._warn(
+                    f"Final answer failed verification "
+                    f"({audit.verified_rate:.0%} of cited sentences supported); regenerating."
+                )
             prompt = agents.resynthesis_prompt(prompt, audit)
 
-        if audit is not None and audit.total_cited and audit.verified_rate < 0.5:
+        if audit is not None and (
+            (audit.total_cited and audit.verified_rate < 0.5)
+            or (not audit.total_cited and grounding.supported)
+        ):
             # Two attempts produced text the evidence does not support. Falling
             # back to a deterministic rendering of the verified claims is the
             # only option that keeps the guarantee intact.
             self._warn(
-                f"Synthesis could not be verified after 2 attempts "
-                f"({audit.verified_rate:.0%}); rendering verified claims instead."
+                "Synthesis could not be verified after 2 attempts "
+                + (f"({audit.verified_rate:.0%} supported)" if audit.total_cited else "(no citations emitted)")
+                + "; rendering verified claims instead."
             )
             self.synthesis_degraded = True
             answer = self._render_claims(grounding)
