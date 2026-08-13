@@ -72,6 +72,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-local", action="store_true", help="ignore local documents")
     parser.add_argument("--no-embeddings", action="store_true", help="BM25 only, no embedding spend")
     parser.add_argument("--no-sanitize", action="store_true", help="skip prompt-injection neutralization")
+    parser.add_argument(
+        "--entailment", action="store_true",
+        help="semantic entailment check on verified claims (catches 'most' cited as 'all'); "
+             "costs one extra call per round",
+    )
     parser.add_argument("--max-cost", type=float, default=None, help="hard spend cap in USD")
     parser.add_argument("--always-answer", action="store_true", help="never abstain, label confidence instead")
     parser.add_argument("--json", action="store_true", help="emit the full result as JSON")
@@ -89,6 +94,8 @@ def main(argv: list[str] | None = None) -> int:
         overrides["use_embeddings"] = False
     if args.no_sanitize:
         overrides["sanitize_sources"] = False
+    if args.entailment:
+        overrides["use_entailment"] = True
     if args.always_answer:
         overrides["abstain_below_support"] = 0.0
     if args.max_cost:

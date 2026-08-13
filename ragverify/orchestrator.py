@@ -36,6 +36,7 @@ from collections.abc import Callable, Sequence
 
 from . import agents, sanitize, websearch
 from . import coverage as coverage_mod
+from . import entailment as entailment_mod
 from . import grounding as grounding_mod
 from .budget import Budget, BudgetExceeded, CircuitBreaker
 from .config import Settings
@@ -292,6 +293,14 @@ class AdaptiveResearcher:
             draft = self._draft(question, evidence)
 
             grounding = grounding_mod.check(draft.claims, evidence)
+
+            # Second stage: semantic entailment over claims that already
+            # passed the lexical check. It can only DOWNGRADE -- a claim
+            # rejected lexically is never revived here, so the deterministic
+            # layer stays the floor and enabling this can never make the
+            # pipeline accept something it previously refused.
+            entail_report = self._entail(grounding, evidence, index)
+
             self.ledger.record_grounding(grounding, index)
             tracer.emit(
                 EventKind.GROUND,
@@ -320,6 +329,7 @@ class AdaptiveResearcher:
                     n_evidence=len(evidence),
                     draft=draft,
                     grounding=grounding,
+                    entailment=entail_report.model_dump(mode="json") if entail_report.ran else {},
                     verifier=verifier,
                     elapsed_s=round(time.time() - round_started, 2),
                 )
@@ -638,6 +648,55 @@ class AdaptiveResearcher:
         except (LLMError, SchemaError, BudgetExceeded) as exc:
             self._warn(f"Research agent failed: {exc}")
             return ResearchDraft(unanswered=["The research step failed to produce a draft."])
+
+    def _entail(self, grounding, evidence, round_index: int):
+        """Run the entailment stage and fold its verdicts back into grounding.
+
+        Downgrade-only by construction: it reads ``grounding.supported`` and
+        can move claims out of it, never in.
+        """
+        report = entailment_mod.EntailmentReport(ran=False)
+        if not self.settings.use_entailment or not grounding.supported:
+            return report
+
+        report = entailment_mod.check_entailment(grounding.supported, evidence, self.client)
+        if not report.ran:
+            if report.error:
+                self._warn(
+                    f"Entailment check unavailable ({report.error}); lexical verdicts stand.",
+                    round_index,
+                )
+            return report
+
+        rejected = list(report.contradicted)
+        if self.settings.entailment_strict:
+            rejected += report.neutral
+
+        if rejected:
+            keep = {c.text for c in report.entailed}
+            grounding.unsupported.extend(rejected)
+            grounding.supported = [c for c in grounding.supported if c.text in keep]
+
+        self.tracer.emit(
+            EventKind.GROUND,
+            f"Round {round_index}: entailment {len(report.entailed)}/{report.total} entailed"
+            + (f", {len(report.contradicted)} CONTRADICTED" if report.has_contradiction else "")
+            + (f", {len(report.neutral)} neutral" if report.neutral else ""),
+            round_index,
+            data={"entailment_rate": report.entailment_rate},
+        )
+        if report.has_contradiction:
+            self._warn(
+                f"{len(report.contradicted)} claim(s) contradicted by their own cited source.",
+                round_index,
+            )
+        if report.unverifiable_quotes:
+            self._warn(
+                f"Entailment judge quoted text absent from the passage "
+                f"({len(report.unverifiable_quotes)}); those claims downgraded.",
+                round_index,
+            )
+        return report
 
     def _verify(
         self,

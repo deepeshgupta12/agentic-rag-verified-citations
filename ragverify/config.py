@@ -105,6 +105,18 @@ class Settings:
     max_cost_usd: float = 1.00
     max_calls: int = 40
 
+    # --- entailment ------------------------------------------------------
+    # Second-stage semantic check over claims that already passed lexical
+    # grounding. Catches what a bag of words structurally cannot: "most" cited
+    # for "all", negation, scope creep, modality, attribution. Off by default
+    # because it costs one call per round and roughly doubles verification
+    # latency.
+    use_entailment: bool = False
+    # Treat NEUTRAL as unsupported. Strict is the safer default once the check
+    # is enabled at all: "the passage does not establish this" is precisely
+    # the case lexical grounding was already waving through.
+    entailment_strict: bool = True
+
     # --- safety ----------------------------------------------------------
     # Neutralize model-directed instructions found in retrieved text. Uploaded
     # files and fetched pages are attacker-controllable input.

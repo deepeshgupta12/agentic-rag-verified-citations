@@ -250,6 +250,8 @@ class RoundRecord(BaseModel):
     query: str
     top_k: int
     n_evidence: int
+    # Populated only when the optional entailment stage ran this round.
+    entailment: dict[str, Any] = Field(default_factory=dict)
     draft: ResearchDraft | None = None
     grounding: GroundingReport | None = None
     verifier: VerifierReport | None = None

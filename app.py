@@ -79,6 +79,12 @@ with st.sidebar:
         help="Decline to answer when fewer than this share of claims verify. 0 disables abstention.",
     )
     max_cost = st.number_input("Max spend per run ($)", 0.05, 20.0, 1.0, 0.05)
+    use_entailment = st.toggle(
+        "Semantic entailment check", value=False,
+        help="Second-stage check on verified claims. Catches what word overlap cannot — "
+             "'most regions' cited for 'all regions', negation, scope creep. "
+             "Costs one extra call per round.",
+    )
 
     st.divider()
     st.markdown("**Retrieval**")
@@ -106,6 +112,7 @@ settings = Settings.from_env(
     sanitize_sources=sanitize_sources,
     abstain_below_support=abstain_below,
     max_cost_usd=float(max_cost),
+    use_entailment=use_entailment,
 )
 
 # ---------------------------------------------------------------------------
@@ -254,6 +261,15 @@ for result in reversed(st.session_state.history):
             )
             if record.query != result.question:
                 st.caption(f"Query used: _{record.query}_")
+            if record.entailment:
+                ent = record.entailment
+                n_ent, n_con = len(ent.get("entailed", [])), len(ent.get("contradicted", []))
+                n_neu = len(ent.get("neutral", []))
+                st.markdown(
+                    f"🧠 Entailment: **{n_ent}** entailed"
+                    + (f" · ⛔ **{n_con} contradicted**" if n_con else "")
+                    + (f" · {n_neu} neutral" if n_neu else "")
+                )
             if ground:
                 st.markdown(
                     f"{icon} Grounding: **{len(ground.supported)}/{ground.total}** claims verified"
