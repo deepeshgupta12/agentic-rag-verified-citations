@@ -188,6 +188,29 @@ python evals/run_eval.py --baseline baseline.json --compare   # non-zero on regr
 
 **25 cases across 9 domains**: finance, contradictions between sources, tabular data, temporal (superseded facts), multilingual, OCR-damaged scans, multi-hop, adversarial/poisoned corpora, and low-authority sources.
 
+### Measured on real documents
+
+A separate run against **7 real public documents** (PEP 8, PEP 20, five Wikipedia
+articles — ~153k characters of navigation chrome, reference markers and tables),
+with 12 questions whose answers are verifiable independently of the pipeline:
+
+| | Result |
+|---|---|
+| Answerable questions correct | **9/9** |
+| Correct abstentions | **3/3** |
+| False abstention | **0.0** |
+| Fabricated citations | **0** |
+| Mean answer validity | 0.907 |
+| Mean rounds · cost | 1.58 · $0.30 |
+
+The run is worth reading for what it caught rather than the score. Three
+questions were initially unanswerable because HTML extraction had silently
+destroyed the data — MathML formulas stripped with the tags, and table cells
+discarded by a short-line filter. On every one of those the pipeline reported
+the absence instead of supplying the value from the model's own knowledge,
+which it certainly had. The verification layers were right and the ingestion
+was wrong; fixing ingestion took the score from 1/9 to 9/9.
+
 Route accuracy is **exact match**, with hybrid tracked separately as over-retrieval — counting hybrid as correct means a router that always says "hybrid" scores 100%. Abstention is scored **in both directions**: answering when it should abstain is hallucination, abstaining when it could answer is uselessness, and optimising either alone is trivially gamed.
 
 Live evals run on manual dispatch, on PRs labelled `run-evals`, and weekly. The schedule catches drift in the *model behind the API* — the failure a commit-triggered run cannot see, because nothing in the repository changed.
