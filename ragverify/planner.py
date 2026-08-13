@@ -251,6 +251,67 @@ def _depth(subs: Sequence[SubQuestion]) -> int:
     return max((depth(s.id, frozenset()) for s in subs), default=0)
 
 
+# A run of capitalised words, allowing lowercase connectors ("Bank of England").
+_PROPER_RUN = re.compile(r"\b[A-Z][\w'-]*(?:\s+(?:of|de|van|der|and|for|the)\s+[A-Z][\w'-]*|\s+[A-Z][\w'-]*)*")
+_QUOTED = re.compile(r"[\"“']([^\"”']{3,60})[\"”']")
+_MEASURE = re.compile(r"\b\d[\d,.]*\s?(?:%|percent\b|million\b|billion\b|bn\b|m\b|k\b)", re.I)
+
+# Words that start a sentence and carry no retrieval signal. A capitalised
+# "The" is punctuation, not an entity.
+_SENTENCE_STARTER_TEXT = (
+    "the this that these those it he she they there here a an in on at for and but "
+    "his her their its we you i our your"
+)
+_SENTENCE_STARTERS = frozenset(_SENTENCE_STARTER_TEXT.split())
+
+
+def salient_terms(claims: Sequence[Claim], limit: int = 6) -> list[str]:
+    """Pull the entities out of findings, for use in a follow-up query.
+
+    Splicing whole claim sentences into the next query technically works --
+    retrieval still matches on the entity buried inside -- but it drags in the
+    prose around it, and BM25 scores every one of those words. "What did The
+    2024 statutory audit letter was signed by Ingrid Halvorsen, Chief Financial
+    Officer. previously run?" retrieves the right passage for the wrong
+    reasons and dilutes the term that actually matters.
+
+    Proper nouns, quoted strings and measurements are what a follow-up query
+    needs. Sentence-initial capitals are dropped because a capitalised "The"
+    is punctuation, not an entity.
+    """
+    terms: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: str) -> None:
+        value = value.strip(" .,;:")
+        key = value.lower()
+        if len(value) > 2 and key not in seen:
+            seen.add(key)
+            terms.append(value)
+
+    for claim in claims:
+        for quoted in _QUOTED.findall(claim.text):
+            add(quoted)
+        # Sentence by sentence, so "first word" is meaningful.
+        for sentence in re.split(r"(?<=[.!?])\s+", claim.text):
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            for match in _PROPER_RUN.finditer(sentence):
+                run = match.group(0)
+                # Single capitalised word at the very start is sentence case.
+                if match.start() == 0 and " " not in run and run.lower() in _SENTENCE_STARTERS:
+                    continue
+                if match.start() == 0 and run.split()[0].lower() in _SENTENCE_STARTERS:
+                    run = run.split(" ", 1)[1] if " " in run else ""
+                if run:
+                    add(run)
+        for measure in _MEASURE.findall(claim.text):
+            add(measure)
+
+    return terms[:limit]
+
+
 def resolve_query(sub: SubQuestion, findings: dict[int, list[Claim]]) -> str:
     """Substitute earlier findings into a dependent sub-question's text.
 
@@ -258,26 +319,27 @@ def resolve_query(sub: SubQuestion, findings: dict[int, list[Claim]]) -> str:
     Without substitution a dependent query still contains its placeholder and
     retrieves noise, which looks like a multi-hop failure but is really a
     plumbing one.
-    """
-    text = sub.text
 
-    def _fill(match: re.Match) -> str:
-        dep = int(match.group(1))
+    Entities are substituted rather than whole sentences: a query is scored
+    term by term, so the surrounding prose competes with the entity that
+    actually matters.
+    """
+
+    def _terms_for(dep: int) -> str:
         claims = findings.get(dep, [])
         if not claims:
             return ""
-        # Join the resolved findings compactly: this becomes a search query,
-        # so prose is unhelpful and entities are what retrieval matches on.
-        return " ".join(c.text for c in claims[:3])
+        terms = salient_terms(claims)
+        # Nothing entity-shaped: fall back to the claim text, truncated. A
+        # verbose query beats an empty one.
+        return ", ".join(terms) if terms else claims[0].text[:120]
 
-    text = _SLOT.sub(_fill, text)
+    text = _SLOT.sub(lambda m: _terms_for(int(m.group(1))), sub.text)
 
     # A dependency with no placeholder still needs its context appended, or
     # the hop searches as if nothing had been learned.
     if not _SLOT.search(sub.text) and sub.depends_on:
-        context = " ".join(
-            c.text for dep in sub.depends_on for c in findings.get(dep, [])[:2]
-        )
+        context = " ".join(filter(None, (_terms_for(dep) for dep in sub.depends_on)))
         if context:
             text = f"{text} {context}"
 

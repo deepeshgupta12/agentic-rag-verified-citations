@@ -123,10 +123,15 @@ class TestQueryResolution:
         assert "Berlin" in resolve_query(sq(1, f"growth for {form}", [0]), findings)
 
     def test_dependency_without_placeholder_gets_context_appended(self):
-        """Otherwise the hop searches as if nothing had been learned."""
+        """Otherwise the hop searches as if nothing had been learned.
+
+        The entity is appended, not the sentence: "Berlin office" yields
+        "Berlin", since a lowercase "office" is not part of the proper noun.
+        """
         findings = {0: [Claim(text="Berlin office", citations=["S1"])]}
         resolved = resolve_query(sq(1, "what was growth", [0]), findings)
-        assert "Berlin office" in resolved
+        assert "Berlin" in resolved
+        assert resolved.startswith("what was growth")
 
     def test_unresolved_dependency_falls_back_to_text(self):
         resolved = resolve_query(sq(1, "growth for {{0}}", [0]), {})
@@ -219,3 +224,60 @@ class TestInRun:
         from test_orchestrator import settings
 
         assert not settings().use_multi_hop, "most questions are single-hop"
+
+
+class TestSalientTerms:
+    """Follow-up queries need entities, not whole sentences.
+
+    Splicing a claim sentence into the next query technically retrieves, but
+    BM25 scores every word in it, so the surrounding prose competes with the
+    entity that actually matters.
+    """
+
+    def test_extracts_people_and_titles(self):
+        from ragverify.planner import salient_terms
+
+        claims = [Claim(
+            text="The 2024 statutory audit letter was signed by Ingrid Halvorsen, "
+                 "Chief Financial Officer.",
+            citations=["S1"],
+        )]
+        assert salient_terms(claims) == ["Ingrid Halvorsen", "Chief Financial Officer"]
+
+    def test_drops_sentence_initial_articles(self):
+        """A capitalised 'The' is punctuation, not an entity."""
+        from ragverify.planner import salient_terms
+
+        terms = salient_terms([Claim(text="The Lisbon office grew 41%.", citations=["S1"])])
+        assert "Lisbon" in terms
+        assert not any(t.lower().startswith("the ") or t.lower() == "the" for t in terms)
+
+    def test_captures_measurements(self):
+        from ragverify.planner import salient_terms
+
+        assert "41%" in salient_terms([Claim(text="Headcount grew 41% in 2024.", citations=["S1"])])
+        assert "2.1 billion" in salient_terms(
+            [Claim(text="Revenue reached 2.1 billion euro.", citations=["S1"])]
+        )
+
+    def test_no_entities_returns_empty(self):
+        from ragverify.planner import salient_terms
+
+        assert salient_terms([Claim(text="the value increased somewhat", citations=["S1"])]) == []
+
+    def test_substitution_uses_entities_not_prose(self):
+        findings = {0: [Claim(
+            text="The 2024 statutory audit letter was signed by Ingrid Halvorsen, "
+                 "Chief Financial Officer.",
+            citations=["S1"],
+        )]}
+        query = resolve_query(sq(1, "What did {{0}} previously run?", [0]), findings)
+
+        assert query == "What did Ingrid Halvorsen, Chief Financial Officer previously run?"
+        assert "statutory audit letter was signed by" not in query
+
+    def test_falls_back_to_claim_text_when_no_entities(self):
+        """A verbose query beats an empty one."""
+        findings = {0: [Claim(text="the value increased somewhat", citations=["S1"])]}
+        query = resolve_query(sq(1, "What caused {{0}}?", [0]), findings)
+        assert "value increased somewhat" in query
