@@ -1,0 +1,14 @@
+# Runtime for the Streamlit app. For library-only use:  pip install ragverify
+openai>=1.40
+pydantic>=2.6
+requests>=2.31
+numpy>=1.24
+python-dotenv>=1.0
+
+# App extras
+streamlit>=1.33
+pypdf>=4.2
+tiktoken>=0.7
+
+# Optional: only needed for the AG2 group-chat adversarial review backend
+# ag2[openai]>=0.11

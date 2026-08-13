@@ -1,0 +1,766 @@
+"""The adaptive research loop.
+
+This module is the reason v2 exists.
+
+The common shape is a straight line: triage once, retrieve once, draft once,
+verify once, synthesize. The verifier produces ``{"verdict": ..., "gaps":
+[...]}``, that object is passed to the synthesizer as *text*, and no control
+flow ever reads it. Nothing branches on it, so "insufficient" and "sufficient"
+produce exactly the same behaviour: write the final answer anyway. Such a
+pipeline computes an adaptation signal and discards it.
+
+The loop here dispatches on that signal:
+
+    triage → [ retrieve → draft → ground → verify ] × N → synthesize
+                   ↑                            │
+                   └──── escalate on verdict ───┘
+
+Escalation is a ladder, so each round is strictly more capable than the last
+rather than a retry of the same failing strategy:
+
+  1. widen_local      more passages, plus the verifier's gaps as extra queries
+  2. refine_query     re-retrieve using the verifier's rewritten phrasing
+  3. escalate_to_web  add live web evidence to the local pool
+  4. budget exhausted answer with what exists and disclose the gaps
+
+The loop also refuses to accept "sufficient" when the mechanical grounding
+rate is below ``min_support_rate``: a model marking its own team's work as
+sufficient is exactly the failure grounding exists to catch.
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from collections.abc import Callable, Sequence
+
+from . import agents, sanitize, websearch
+from . import coverage as coverage_mod
+from . import grounding as grounding_mod
+from .budget import Budget, CircuitBreaker
+from .config import Settings
+from .ingest import Document, build_index, corpus_summary, top_terms
+from .llm import LLMClient, LLMError, SchemaError
+from .retrieval import DenseIndex, HybridRetriever
+from .schemas import (
+    Chunk,
+    EvidenceItem,
+    GroundingReport,
+    NextAction,
+    Outcome,
+    ResearchDraft,
+    ResearchResult,
+    RoundRecord,
+    Route,
+    TriageDecision,
+    Verdict,
+    VerifierReport,
+    WebResult,
+)
+from .trace import EventKind, Tracer
+
+log = logging.getLogger("ragverify.orchestrator")
+
+# Above this measured coverage, a pre-retrieval NO_ANSWER is not credible.
+WEAK_ENOUGH = 0.15
+
+
+class Corpus:
+    """A prepared, reusable local index.
+
+    Built once and cached by the caller. Re-parsing every uploaded PDF and
+    rebuilding the chunk index per question would parse a 200-page report five
+    times to answer five questions.
+    """
+
+    def __init__(
+        self,
+        documents: Sequence[Document],
+        settings: Settings,
+        client: LLMClient | None = None,
+        tracer: Tracer | None = None,
+    ) -> None:
+        self.settings = settings
+        self.documents = list(documents)
+        self.chunks: list[Chunk] = build_index(
+            self.documents, settings.chunk_tokens, settings.chunk_overlap_tokens
+        )
+        self.summary = corpus_summary(self.chunks)
+        self.terms = top_terms(self.chunks)
+        self.warnings: list[str] = []
+
+        dense: DenseIndex | None = None
+        embed_query = None
+        if settings.use_embeddings and client and self.chunks:
+            try:
+                vectors = client.embed([c.text for c in self.chunks])
+                dense = DenseIndex(self.chunks, vectors)
+                embed_query = lambda q: client.embed([q])[0]  # noqa: E731
+            except Exception as exc:  # noqa: BLE001 - lexical-only is a fine corpus
+                self.warnings.append(f"Embeddings unavailable, using BM25 only ({exc}).")
+                if tracer:
+                    tracer.emit(EventKind.WARNING, self.warnings[-1])
+
+        self.retriever = HybridRetriever(self.chunks, dense=dense, embed_query=embed_query)
+
+    def __len__(self) -> int:
+        return len(self.chunks)
+
+
+def _to_evidence(scored, prefix: str = "S") -> list[EvidenceItem]:
+    return [
+        EvidenceItem(
+            source_id=f"{prefix}{i}",
+            label=s.chunk.label,
+            text=s.chunk.text,
+            origin=Route.LOCAL,
+            score=s.score,
+        )
+        for i, s in enumerate(scored, start=1)
+    ]
+
+
+def _web_evidence(
+    results: Sequence[WebResult],
+    pages: dict,
+    settings: Settings,
+    start_index: int,
+) -> list[EvidenceItem]:
+    """Turn search results into evidence, preferring fetched page text.
+
+    Falls back to the SERP snippet when a page could not be fetched, and marks
+    it so grounding is judged against what was actually available.
+    """
+    from .tokens import truncate_to_tokens
+
+    out: list[EvidenceItem] = []
+    for offset, result in enumerate(results):
+        body = pages.get(result.url, "").strip()
+        if body:
+            text = truncate_to_tokens(body, settings.chunk_tokens * 4)
+        elif result.snippet:
+            text = f"(search snippet only, page not retrieved) {result.snippet}"
+        else:
+            continue
+        out.append(
+            EvidenceItem(
+                source_id=f"W{start_index + offset}",
+                label=f"{result.label} [{websearch.domain(result.url)}]",
+                text=text,
+                origin=Route.WEB,
+                url=result.url,
+            )
+        )
+    return out
+
+
+class AdaptiveResearcher:
+    """Runs the adaptive loop for one question against one corpus."""
+
+    def __init__(
+        self,
+        settings: Settings,
+        client: LLMClient,
+        corpus: Corpus | None = None,
+        tracer: Tracer | None = None,
+        budget: Budget | None = None,
+    ) -> None:
+        self.settings = settings
+        self.client = client
+        self.corpus = corpus
+        self.tracer = tracer or Tracer()
+        self.warnings: list[str] = list(corpus.warnings) if corpus else []
+        self.budget = budget or Budget(
+            max_seconds=settings.max_seconds,
+            max_cost_usd=settings.max_cost_usd,
+            max_calls=settings.max_calls,
+        )
+        self.breaker = CircuitBreaker()
+        self.injections: list[str] = []
+
+    # ------------------------------------------------------------------
+
+    def run(self, question: str) -> ResearchResult:
+        started = time.time()
+        settings = self.settings
+        tracer = self.tracer
+        tracer.emit(EventKind.START, f"Researching: {question}")
+
+        rounds: list[RoundRecord] = []
+
+        # Measure coverage BEFORE routing. Judging "document coverage" from
+        # filenames and a chunk count is guesswork; this probes the index with
+        # a free BM25 pass so the decision is made against retrieved content
+        # and real scores.
+        cov = coverage_mod.measure(question, self.corpus.retriever if self.corpus else None)
+        suggested, reason = coverage_mod.suggest_route(
+            cov, self._web_available(), bool(self.corpus and len(self.corpus))
+        )
+        self.tracer.emit(
+            EventKind.RETRIEVE,
+            f"Coverage probe: {cov.verdict} ({cov.score:.2f}) — term recall {cov.term_recall:.0%}"
+            + (f", missing: {', '.join(cov.missing_terms[:4])}" if cov.missing_terms else ""),
+            data={"coverage": cov.score, "suggested": suggested.value, "reason": reason},
+        )
+
+        triage = self._triage(question, cov, suggested, reason)
+
+        # Terminal routes end the run without spending a round.
+        if triage.route is Route.CLARIFY:
+            return self._clarify_result(question, triage, started)
+        if triage.route is Route.NO_ANSWER:
+            return self._abstain_result(question, triage, started, Outcome.ABSTAINED)
+
+        route = self._initial_route(triage)
+        query = question
+        top_k = settings.top_k
+        expansions: list[str] = list(triage.sub_queries)
+        web_pool: list[EvidenceItem] = []
+
+        draft = ResearchDraft()
+        grounding = GroundingReport()
+        verifier = VerifierReport(
+            verdict=Verdict.INSUFFICIENT,
+            next_action=NextAction.ANSWER,
+            rationale="No round completed.",
+        )
+        evidence: list[EvidenceItem] = []
+        stopped_early = True
+        budget_stopped = False
+
+        for index in range(1, settings.max_rounds + 1):
+            round_started = time.time()
+            tracer.emit(
+                EventKind.RETRIEVE,
+                f"Round {index}: retrieving via {route.value} (top_k={top_k})",
+                index,
+                route=route.value,
+                query=query,
+            )
+
+            evidence = self._gather(question, query, route, top_k, expansions, web_pool, index)
+            if not evidence:
+                self._warn("No evidence retrieved this round.", index)
+                if route is not Route.WEB and self._web_available():
+                    route = Route.WEB
+                    continue
+                break
+
+            # Retrieved text is untrusted input. Neutralize model-directed
+            # instructions before it reaches any prompt.
+            if settings.sanitize_sources:
+                evidence, detections = sanitize.sanitize_evidence(evidence)
+                if detections:
+                    note = sanitize.summarize(detections)
+                    self.injections.extend(sorted({d.kind for d in detections}))
+                    self._warn(note, index)
+
+            tracer.emit(
+                EventKind.RESEARCH,
+                f"Round {index}: drafting from {len(evidence)} passages",
+                index,
+                n_evidence=len(evidence),
+            )
+            draft = self._draft(question, evidence)
+
+            grounding = grounding_mod.check(draft.claims, evidence)
+            tracer.emit(
+                EventKind.GROUND,
+                f"Round {index}: {len(grounding.supported)}/{grounding.total} claims grounded"
+                f"{f', {len(grounding.hallucinated_citations)} fabricated citation(s)' if grounding.hallucinated_citations else ''}",
+                index,
+                support_rate=grounding.support_rate,
+                hallucinated=grounding.hallucinated_citations,
+            )
+
+            verifier = self._verify(question, draft, grounding, route, index)
+            tracer.emit(
+                EventKind.VERIFY,
+                f"Round {index}: verdict={verifier.verdict.value}, next={verifier.next_action.value}",
+                index,
+                verdict=verifier.verdict.value,
+                gaps=verifier.gaps,
+            )
+
+            rounds.append(
+                RoundRecord(
+                    index=index,
+                    route=route,
+                    query=query,
+                    top_k=top_k,
+                    n_evidence=len(evidence),
+                    draft=draft,
+                    grounding=grounding,
+                    verifier=verifier,
+                    elapsed_s=round(time.time() - round_started, 2),
+                )
+            )
+
+            if self._can_answer(verifier, grounding):
+                stopped_early = False
+                break
+
+            if index == settings.max_rounds:
+                break
+
+            # Check the budget before escalating, not after: stopping at a
+            # round boundary leaves a usable answer, whereas running out
+            # mid-round leaves nothing.
+            self._sync_budget()
+            if not self.budget.can_afford_round():
+                self._warn(
+                    f"Stopping early — {self.budget.exhausted() or 'insufficient budget for another round'}.",
+                    index,
+                )
+                budget_stopped = True
+                break
+
+            route, query, top_k, expansions = self._escalate(
+                verifier, question, query, route, top_k, expansions, index
+            )
+
+        # Abstain rather than answer when nothing survived grounding. An
+        # answer built on zero verified claims is worse than none: it reads
+        # exactly like a good one.
+        if self._should_abstain(rounds, grounding, evidence):
+            return self._abstain_result(
+                question,
+                triage,
+                started,
+                Outcome.ABSTAINED,
+                rounds=rounds,
+                gaps=verifier.gaps,
+            )
+
+        final_answer, confidence = self._synthesize(question, grounding, evidence, verifier)
+
+        if budget_stopped:
+            outcome = Outcome.BUDGET
+        elif stopped_early and rounds:
+            outcome = Outcome.PARTIAL
+        else:
+            outcome = Outcome.ANSWERED
+
+        self._sync_budget()
+        result = ResearchResult(
+            question=question,
+            final_answer=final_answer,
+            confidence=confidence,
+            outcome=outcome,
+            citations=self._cited(evidence, grounding),
+            rounds=rounds,
+            triage=triage,
+            usage=self.client.usage,
+            stopped_early=stopped_early and bool(rounds),
+            open_gaps=verifier.gaps,
+            warnings=self.warnings + (self.corpus.retriever.warnings if self.corpus else []),
+            injections_detected=sorted(set(self.injections)),
+            budget=self.budget.snapshot(),
+            elapsed_s=round(time.time() - started, 2),
+        )
+        tracer.emit(
+            EventKind.DONE,
+            f"{outcome.value} in {result.elapsed_s}s over {len(rounds)} round(s) — "
+            f"${result.usage.cost_usd:.4f}",
+            data={"confidence": confidence, "outcome": outcome.value},
+        )
+        return result
+
+    # ------------------------------------------------------------------
+    # Terminal outcomes
+    # ------------------------------------------------------------------
+
+    def _should_abstain(
+        self,
+        rounds: list[RoundRecord],
+        grounding: GroundingReport,
+        evidence: Sequence[EvidenceItem],
+    ) -> bool:
+        if not rounds or not evidence:
+            return False  # handled by the no-evidence path in _synthesize
+        if self.settings.abstain_below_support <= 0:
+            return False
+        if not grounding.total:
+            return True
+        return grounding.support_rate < self.settings.abstain_below_support
+
+    def _clarify_result(self, question: str, triage: TriageDecision, started: float) -> ResearchResult:
+        ask = triage.clarifying_question or "Could you narrow the question? It is too broad to retrieve for."
+        self.tracer.emit(EventKind.DONE, "Asking for clarification", data={"outcome": "clarify"})
+        self._sync_budget()
+        return ResearchResult(
+            question=question,
+            final_answer=f"**I need one clarification before researching this.**\n\n{ask}",
+            confidence="low",
+            outcome=Outcome.CLARIFY,
+            triage=triage,
+            clarifying_question=ask,
+            usage=self.client.usage,
+            warnings=self.warnings,
+            budget=self.budget.snapshot(),
+            elapsed_s=round(time.time() - started, 2),
+        )
+
+    def _abstain_result(
+        self,
+        question: str,
+        triage: TriageDecision | None,
+        started: float,
+        outcome: Outcome,
+        rounds: list[RoundRecord] | None = None,
+        gaps: list[str] | None = None,
+    ) -> ResearchResult:
+        gaps = gaps or []
+        reason = (
+            triage.rationale
+            if triage and triage.route is Route.NO_ANSWER and triage.rationale
+            else "No claim survived verification against the retrieved sources."
+        )
+        body = [
+            "**I can't answer this from the available evidence.**",
+            "",
+            reason,
+        ]
+        if gaps:
+            body += ["", "Specifically, these remain unresolved:", *[f"- {g}" for g in gaps]]
+        body += [
+            "",
+            "_Answering anyway would mean presenting unverified claims as fact, "
+            "which is the failure this pipeline exists to prevent._",
+        ]
+
+        self.tracer.emit(EventKind.DONE, "Abstained — evidence insufficient", data={"outcome": outcome.value})
+        self._sync_budget()
+        return ResearchResult(
+            question=question,
+            final_answer="\n".join(body),
+            confidence="low",
+            outcome=outcome,
+            rounds=rounds or [],
+            triage=triage,
+            usage=self.client.usage,
+            open_gaps=gaps,
+            warnings=self.warnings + (self.corpus.retriever.warnings if self.corpus else []),
+            injections_detected=sorted(set(self.injections)),
+            budget=self.budget.snapshot(),
+            elapsed_s=round(time.time() - started, 2),
+        )
+
+    def _sync_budget(self) -> None:
+        """Mirror the client's usage into the budget tracker."""
+        usage = self.client.usage
+        self.budget.calls = usage.calls
+        self.budget.cost_usd = usage.cost_usd
+
+    # ------------------------------------------------------------------
+    # Steps
+    # ------------------------------------------------------------------
+
+    def _triage(
+        self,
+        question: str,
+        cov: coverage_mod.CoverageReport,
+        suggested: Route,
+        reason: str,
+    ) -> TriageDecision:
+        """Ask the agent to confirm or override a measured route.
+
+        The model is given the coverage measurement, the passages the probe
+        actually retrieved, and a suggested route with its justification. It
+        can still override -- it sees the question's semantics, which BM25
+        does not -- but it is now correcting a measurement rather than
+        guessing from a filename.
+        """
+        summary = self.corpus.summary if self.corpus else "No local documents provided."
+        terms = self.corpus.terms if self.corpus else []
+        try:
+            decision = self.client.structured(
+                agents.TRIAGE_SYSTEM,
+                agents.triage_prompt(question, summary, terms, cov, suggested, reason),
+                TriageDecision,
+            )
+        except (LLMError, SchemaError) as exc:
+            # A failed triage is recoverable: fall back to the measurement,
+            # which needed no model call in the first place.
+            self._warn(f"Triage agent failed ({exc}); using the measured route.")
+            decision = TriageDecision(
+                route=suggested,
+                confidence=0.0,
+                rationale=f"Triage unavailable; using measured coverage. {reason}",
+            )
+
+        decision.measured_coverage = cov.score
+
+        # Guard the terminal routes: a model that answers CLARIFY for every
+        # slightly-broad question makes the tool useless, so clarification
+        # requires an actual question to ask.
+        if decision.route is Route.CLARIFY and not decision.clarifying_question:
+            decision.route = suggested
+            decision.rationale += " (clarify requested without a question; using measured route)"
+
+        # NO_ANSWER before any retrieval is only credible when there is
+        # genuinely nothing to search.
+        if decision.route is Route.NO_ANSWER and (self._web_available() or cov.score > WEAK_ENOUGH):
+            decision.route = suggested
+            decision.rationale += " (sources are available; proceeding rather than abstaining)"
+
+        self.tracer.emit(
+            EventKind.TRIAGE,
+            f"Route: {decision.route.value} (confidence {decision.confidence:.0%}) — {decision.rationale}"
+            + (f" [measured suggestion was {suggested.value}]" if decision.route is not suggested else ""),
+            data=decision.model_dump(mode="json"),
+        )
+        return decision
+
+    def _initial_route(self, triage: TriageDecision) -> Route:
+        """Reconcile the model's route with what is physically available.
+
+        Handling only "no documents → web" leaves the inverse case broken:
+        with web disabled and a web verdict, the run silently falls through to
+        the local branch and searches an empty index.
+        """
+        has_local = bool(self.corpus and len(self.corpus))
+        has_web = self._web_available()
+
+        if not has_local and not has_web:
+            return Route.LOCAL
+        if not has_local:
+            return Route.WEB
+        if not has_web:
+            return Route.LOCAL
+        return triage.route
+
+    def _gather(
+        self,
+        question: str,
+        query: str,
+        route: Route,
+        top_k: int,
+        expansions: Sequence[str],
+        web_pool: list[EvidenceItem],
+        round_index: int,
+    ) -> list[EvidenceItem]:
+        evidence: list[EvidenceItem] = []
+
+        if route in (Route.LOCAL, Route.HYBRID) and self.corpus and len(self.corpus):
+            scored = self.corpus.retriever.search(query, top_k, expansions=expansions)
+            evidence.extend(_to_evidence(scored))
+
+        if route in (Route.WEB, Route.HYBRID) and self._web_available():
+            # Reuse pages already fetched in an earlier round rather than
+            # paying the network cost again for the same URLs.
+            if web_pool and route is Route.HYBRID:
+                evidence.extend(web_pool)
+            else:
+                fetched = self._search_web(query, expansions, len(evidence) + 1, round_index)
+                web_pool.clear()
+                web_pool.extend(fetched)
+                evidence.extend(fetched)
+
+        return evidence
+
+    def _search_web(
+        self,
+        query: str,
+        expansions: Sequence[str],
+        start_index: int,
+        round_index: int,
+    ) -> list[EvidenceItem]:
+        queries = [query, *list(expansions)[:2]]
+        results: list[WebResult] = []
+        seen: set[str] = set()
+        for q in queries:
+            for result in websearch.search(q, self.settings):
+                if result.url not in seen:
+                    seen.add(result.url)
+                    results.append(result)
+            if len(results) >= self.settings.web_max_results:
+                break
+
+        if not results:
+            self._warn("Web search returned no results (all backends failed or empty).", round_index)
+            return []
+
+        pages = websearch.fetch_many(results, self.settings)
+        if not pages:
+            self._warn("Could not fetch any result pages; falling back to search snippets.", round_index)
+        return _web_evidence(results[: self.settings.web_max_results], pages, self.settings, start_index)
+
+    def _draft(self, question: str, evidence: Sequence[EvidenceItem]) -> ResearchDraft:
+        try:
+            return self.client.structured(
+                agents.RESEARCH_SYSTEM,
+                agents.research_prompt(question, evidence, self.settings.evidence_token_budget),
+                ResearchDraft,
+            )
+        except (LLMError, SchemaError) as exc:
+            self._warn(f"Research agent failed: {exc}")
+            return ResearchDraft(unanswered=["The research step failed to produce a draft."])
+
+    def _verify(
+        self,
+        question: str,
+        draft: ResearchDraft,
+        grounding: GroundingReport,
+        route: Route,
+        round_index: int,
+    ) -> VerifierReport:
+        try:
+            return self.client.structured(
+                agents.VERIFIER_SYSTEM,
+                agents.verifier_prompt(
+                    question,
+                    draft,
+                    grounding,
+                    route,
+                    round_index,
+                    self.settings.max_rounds,
+                    self._web_available(),
+                ),
+                VerifierReport,
+            )
+        except (LLMError, SchemaError) as exc:
+            # Fail closed on the *quality* judgement but open on control flow:
+            # without a verdict we cannot claim sufficiency, yet blocking the
+            # loop entirely would return nothing at all.
+            self._warn(f"Verifier failed ({exc}); treating as partial.", round_index)
+            return VerifierReport(
+                verdict=Verdict.PARTIAL,
+                next_action=NextAction.ANSWER,
+                rationale="Verifier unavailable; answer not independently checked.",
+            )
+
+    def _can_answer(self, verifier: VerifierReport, grounding: GroundingReport) -> bool:
+        """Gate on both the verifier's verdict and the mechanical support rate.
+
+        The second condition is what stops a lenient verifier from waving
+        through a draft whose citations do not hold up. If the verifier says
+        "sufficient" but only a third of claims survived grounding, that
+        disagreement is resolved in favour of the deterministic check.
+        """
+        if verifier.next_action is not NextAction.ANSWER and verifier.verdict is not Verdict.SUFFICIENT:
+            return False
+        if verifier.verdict is Verdict.INSUFFICIENT:
+            return False
+        if grounding.total and grounding.support_rate < self.settings.min_support_rate:
+            self.tracer.emit(
+                EventKind.WARNING,
+                f"Verifier said {verifier.verdict.value} but only "
+                f"{grounding.support_rate:.0%} of claims are grounded; continuing.",
+            )
+            return False
+        return True
+
+    def _escalate(
+        self,
+        verifier: VerifierReport,
+        question: str,
+        query: str,
+        route: Route,
+        top_k: int,
+        expansions: list[str],
+        round_index: int,
+    ) -> tuple[Route, str, int, list[str]]:
+        """Pick the next round's strategy from the verifier's instruction.
+
+        Gaps are always folded into ``expansions`` regardless of the branch
+        taken: they are the concrete, retrievable descriptions of what is
+        missing, and they widen retrieval even when the route is unchanged.
+        """
+        action = verifier.next_action
+        new_expansions = list(dict.fromkeys([*expansions, *verifier.gaps]))[:6]
+        new_route, new_query, new_top_k = route, query, top_k
+
+        if action is NextAction.ESCALATE_TO_WEB and self._web_available():
+            new_route = Route.HYBRID if (self.corpus and len(self.corpus)) else Route.WEB
+        elif action is NextAction.REFINE_QUERY and verifier.refined_query:
+            new_query = verifier.refined_query
+        elif action is NextAction.WIDEN_LOCAL:
+            new_top_k = min(top_k * self.settings.widen_factor, 24)
+        else:
+            # The verifier asked for something impossible (web escalation with
+            # web off, or refine with no query). Widening is the only strategy
+            # guaranteed to be available, so the round is never wasted.
+            new_top_k = min(top_k * self.settings.widen_factor, 24)
+            if self._web_available() and route is Route.LOCAL:
+                new_route = Route.HYBRID
+
+        # A round identical to the previous one would burn budget for nothing.
+        if (new_route, new_query, new_top_k) == (route, query, top_k) and new_expansions == expansions:
+            new_top_k = min(top_k * self.settings.widen_factor, 24)
+
+        self.tracer.emit(
+            EventKind.ESCALATE,
+            f"Escalating: {route.value}→{new_route.value}, top_k {top_k}→{new_top_k}"
+            + (", query refined" if new_query != query else ""),
+            round_index,
+            gaps=verifier.gaps,
+        )
+        return new_route, new_query, new_top_k, new_expansions
+
+    def _synthesize(
+        self,
+        question: str,
+        grounding: GroundingReport,
+        evidence: Sequence[EvidenceItem],
+        verifier: VerifierReport,
+    ) -> tuple[str, str]:
+        if not grounding.supported and not evidence:
+            return (
+                "I could not find evidence to answer this question. "
+                + ("No local documents were searchable and web search was unavailable."
+                   if not self._web_available()
+                   else "Neither the uploaded documents nor web search returned relevant material."),
+                "low",
+            )
+
+        self.tracer.emit(EventKind.SYNTHESIZE, "Writing final answer")
+        try:
+            answer = self.client.complete(
+                agents.SYNTHESIZER_SYSTEM,
+                agents.synthesis_prompt(
+                    question, grounding, evidence, verifier, self.settings.evidence_token_budget
+                ),
+            )
+        except LLMError as exc:
+            self._warn(f"Synthesis failed ({exc}); returning verified claims directly.")
+            answer = "\n".join(f"- {c.text} {c.citations}" for c in grounding.supported)
+
+        return answer, self._confidence(grounding, verifier)
+
+    def _confidence(self, grounding: GroundingReport, verifier: VerifierReport) -> str:
+        if verifier.verdict is Verdict.SUFFICIENT and grounding.support_rate >= 0.8:
+            return "high"
+        if verifier.verdict is Verdict.INSUFFICIENT or grounding.support_rate < 0.5:
+            return "low"
+        return "medium"
+
+    @staticmethod
+    def _cited(evidence: Sequence[EvidenceItem], grounding: GroundingReport) -> list[EvidenceItem]:
+        """Only return sources a surviving claim actually cited."""
+        used = {cid for claim in grounding.supported for cid in claim.citations}
+        by_id = {e.source_id: e for e in evidence}
+        return [by_id[cid] for cid in sorted(used) if cid in by_id]
+
+    # ------------------------------------------------------------------
+
+    def _web_available(self) -> bool:
+        return self.settings.web_enabled
+
+    def _warn(self, message: str, round_index: int = 0) -> None:
+        self.warnings.append(message)
+        self.tracer.emit(EventKind.WARNING, message, round_index)
+
+
+def research(
+    question: str,
+    documents: Sequence[Document] = (),
+    settings: Settings | None = None,
+    on_event: Callable | None = None,
+) -> ResearchResult:
+    """One-call entry point used by the CLI and tests."""
+    settings = settings or Settings.from_env()
+    tracer = Tracer(on_event=on_event)
+    client = LLMClient(settings)
+    corpus = Corpus(documents, settings, client, tracer) if documents else None
+    return AdaptiveResearcher(settings, client, corpus, tracer).run(question)

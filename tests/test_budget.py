@@ -1,0 +1,103 @@
+"""Budget caps and the circuit breaker.
+
+A fixed-length pipeline is implicitly bounded by its fixed call count. An
+adaptive loop removes that accidental safety: each round costs
+more than the last, and a corpus that never satisfies the verifier keeps
+buying rounds.
+"""
+
+from __future__ import annotations
+
+import time
+
+import pytest
+
+from ragverify.budget import Budget, BudgetExceeded, CircuitBreaker
+
+
+class TestBudget:
+    def test_fresh_budget_has_room(self):
+        assert Budget().exhausted() is None
+        Budget().check()  # must not raise
+
+    def test_cost_cap(self):
+        budget = Budget(max_cost_usd=0.10)
+        budget.record(calls=1, cost_usd=0.11)
+        assert "cost budget exhausted" in budget.exhausted()
+        with pytest.raises(BudgetExceeded):
+            budget.check()
+
+    def test_call_cap(self):
+        budget = Budget(max_calls=3)
+        budget.record(calls=3)
+        assert "call budget exhausted" in budget.exhausted()
+
+    def test_time_cap(self):
+        budget = Budget(max_seconds=0.01)
+        time.sleep(0.02)
+        assert "time budget exhausted" in budget.exhausted()
+
+    def test_can_afford_round_is_predictive(self):
+        # Checked BEFORE escalating, so the loop stops at a clean boundary
+        # with a usable answer rather than dying mid-round.
+        budget = Budget(max_calls=10)
+        budget.record(calls=8)
+        assert budget.can_afford_round(estimated_calls=2)
+        assert not budget.can_afford_round(estimated_calls=3)
+
+    def test_can_afford_round_respects_time(self):
+        budget = Budget(max_seconds=10.0)
+        assert not budget.can_afford_round(estimated_seconds=20.0)
+
+    def test_snapshot_reports_percentages(self):
+        budget = Budget(max_cost_usd=1.0, max_calls=10)
+        budget.record(calls=5, cost_usd=0.25)
+        snap = budget.snapshot()
+        assert snap["calls"] == 5
+        assert snap["cost_usd"] == 0.25
+        assert snap["pct_cost"] == 25.0
+
+    def test_zero_cost_cap_does_not_divide_by_zero(self):
+        assert Budget(max_cost_usd=0.0).snapshot()["pct_cost"] == 0.0
+
+
+class TestCircuitBreaker:
+    def test_opens_after_threshold(self):
+        breaker = CircuitBreaker(threshold=3)
+        for _ in range(2):
+            breaker.record_failure("searx")
+        assert not breaker.is_open("searx")
+        breaker.record_failure("searx")
+        assert breaker.is_open("searx")
+
+    def test_guard_raises_when_open(self):
+        breaker = CircuitBreaker(threshold=1)
+        breaker.record_failure("searx")
+        with pytest.raises(BudgetExceeded, match="circuit breaker open"):
+            breaker.guard("searx")
+
+    def test_success_resets(self):
+        breaker = CircuitBreaker(threshold=2)
+        breaker.record_failure("searx")
+        breaker.record_success("searx")
+        breaker.record_failure("searx")
+        assert not breaker.is_open("searx"), "the counter must reset on success"
+
+    def test_half_open_after_cooldown(self):
+        breaker = CircuitBreaker(threshold=1, cooldown_s=0.01)
+        breaker.record_failure("searx")
+        assert breaker.is_open("searx")
+        time.sleep(0.02)
+        assert not breaker.is_open("searx"), "cooldown must allow a probe through"
+
+    def test_circuits_are_independent(self):
+        breaker = CircuitBreaker(threshold=1)
+        breaker.record_failure("searx")
+        assert breaker.is_open("searx")
+        assert not breaker.is_open("openai"), "one dead dependency must not disable others"
+
+    def test_open_circuits_listed(self):
+        breaker = CircuitBreaker(threshold=1)
+        breaker.record_failure("searx")
+        breaker.record_failure("ddg")
+        assert set(breaker.open_circuits()) == {"searx", "ddg"}
