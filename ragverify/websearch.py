@@ -223,7 +223,13 @@ def _assert_safe_url(url: str) -> None:
             raise UnsafeURL(f"{host} resolves to non-public address {address}")
 
 
-def fetch_page(url: str, settings: Settings, max_chars: int = 20_000) -> str:
+def fetch_page(
+    url: str,
+    settings: Settings,
+    max_chars: int = 20_000,
+    breaker: CircuitBreaker | None = None,
+    deadline: float | None = None,
+) -> str:
     """Fetch and extract readable text from ``url``. Empty string on failure.
 
     Deliberately dependency-free rather than pulling in trafilatura: the goal
@@ -237,13 +243,32 @@ def fetch_page(url: str, settings: Settings, max_chars: int = 20_000) -> str:
     """
     requests = _requests()
     current = url
+    host = urlparse(url).hostname or url
+
+    # A host that has already failed this run is not retried. Fetching is the
+    # last external call that was completely unmetered: with N results per
+    # round and a 12s timeout each, a set of dead hosts could consume the
+    # whole run budget inside page retrieval alone.
+    if breaker is not None and breaker.is_open(host):
+        log.info("skipping fetch %s: circuit open", host)
+        return ""
+
     try:
         for _hop in range(MAX_REDIRECTS):
+            # A per-request timeout does not bound total time; the run
+            # deadline does.
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    log.info("skipping fetch %s: run deadline passed", current)
+                    return ""
             _assert_safe_url(current)
             response = requests.get(
                 current,
                 headers={"User-Agent": _UA, "Accept": "text/html,application/xhtml+xml"},
-                timeout=settings.request_timeout_s,
+                timeout=min(settings.request_timeout_s, remaining)
+                if deadline is not None
+                else settings.request_timeout_s,
                 allow_redirects=False,
                 stream=True,
             )
@@ -275,15 +300,21 @@ def fetch_page(url: str, settings: Settings, max_chars: int = 20_000) -> str:
                 if total > MAX_RESPONSE_BYTES:
                     break
             body = b"".join(chunks).decode(response.encoding or "utf-8", errors="replace")
+            if breaker is not None:
+                breaker.record_success(host)
             return _extract_text(body)[:max_chars]
 
         log.info("too many redirects for %s", url)
         return ""
     except UnsafeURL as exc:
+        # Not a transport failure: do not count a blocked address against the
+        # host's circuit, or one bad link would disable a working domain.
         log.warning("blocked unsafe fetch %s: %s", url, exc)
         return ""
     except Exception as exc:  # noqa: BLE001 - a dead link is not a run failure
         log.info("fetch failed for %s: %s", url, exc)
+        if breaker is not None:
+            breaker.record_failure(host)
         return ""
 
 
@@ -309,6 +340,8 @@ def fetch_many(
     settings: Settings,
     limit: int = 5,
     max_workers: int = 5,
+    breaker: CircuitBreaker | None = None,
+    deadline: float | None = None,
 ) -> dict[str, str]:
     """Fetch the top ``limit`` results concurrently.
 
@@ -320,9 +353,24 @@ def fetch_many(
         return {}
 
     pages: dict[str, str] = {}
+    try:
+        _fetch_into(pages, targets, settings, max_workers, breaker, deadline)
+    except concurrent.futures.TimeoutError:
+        # Whatever arrived before the deadline is still usable evidence.
+        log.info("fetch_many hit the deadline with %d page(s) retrieved", len(pages))
+    return pages
+
+
+def _fetch_into(pages, targets, settings, max_workers, breaker, deadline) -> None:
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(fetch_page, r.url, settings): r.url for r in targets}
-        for future in concurrent.futures.as_completed(futures, timeout=settings.request_timeout_s * 3):
+        futures = {
+            pool.submit(fetch_page, r.url, settings, 20_000, breaker, deadline): r.url
+            for r in targets
+        }
+        overall = settings.request_timeout_s * 3
+        if deadline is not None:
+            overall = min(overall, max(0.1, deadline - time.monotonic()))
+        for future in concurrent.futures.as_completed(futures, timeout=overall):
             url = futures[future]
             try:
                 text = future.result()
@@ -330,7 +378,6 @@ def fetch_many(
                 text = ""
             if text:
                 pages[url] = text
-    return pages
 
 
 def domain(url: str) -> str:

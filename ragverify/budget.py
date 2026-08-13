@@ -45,6 +45,17 @@ class Budget:
     def remaining_seconds(self) -> float:
         return max(0.0, self.max_seconds - self.elapsed)
 
+    @property
+    def deadline(self) -> float:
+        """Absolute monotonic time this run must stop by.
+
+        A single deadline propagated to every external call is what makes the
+        time cap real. Per-request timeouts bound one call each and compose
+        into an unbounded total: five fetches at 12s is a 60s worst case that
+        no per-call setting can prevent.
+        """
+        return self.started_at + self.max_seconds
+
     def exhausted(self) -> str | None:
         """Why the budget is spent, or None while it still has room."""
         if self.elapsed >= self.max_seconds:

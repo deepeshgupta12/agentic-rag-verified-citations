@@ -143,3 +143,48 @@ class TestBreakerWiredIntoSearch:
 
         assert websearch.search("q1", cfg, breaker)
         assert websearch.search("q2", cfg, breaker), "a working endpoint stays available"
+
+
+class TestFetchPathGuards:
+    """Fetching was the last completely unmetered external call."""
+
+    def test_open_circuit_skips_fetch(self, monkeypatch):
+        from ragverify.config import Settings
+        from ragverify.websearch import fetch_page
+
+        called = []
+        monkeypatch.setattr(
+            "ragverify.websearch._assert_safe_url", lambda u: called.append(u)
+        )
+        breaker = CircuitBreaker(threshold=1)
+        breaker.record_failure("dead.example")
+
+        assert fetch_page("https://dead.example/page", Settings(), breaker=breaker) == ""
+        assert not called, "must not even validate a URL on an open circuit"
+
+    def test_expired_deadline_skips_fetch(self, monkeypatch):
+        import time
+
+        from ragverify.config import Settings
+        from ragverify.websearch import fetch_page
+
+        called = []
+        monkeypatch.setattr(
+            "ragverify.websearch._assert_safe_url", lambda u: called.append(u)
+        )
+        past = time.monotonic() - 1
+        assert fetch_page("https://example.com/x", Settings(), deadline=past) == ""
+        assert not called
+
+    def test_blocked_url_does_not_trip_the_circuit(self):
+        """One bad link must not disable an otherwise working domain."""
+        from ragverify.config import Settings
+        from ragverify.websearch import fetch_page
+
+        breaker = CircuitBreaker(threshold=1)
+        fetch_page("http://127.0.0.1/admin", Settings(), breaker=breaker)
+        assert not breaker.is_open("127.0.0.1"), "an SSRF block is not a transport failure"
+
+    def test_budget_exposes_a_single_deadline(self):
+        budget = Budget(max_seconds=30.0)
+        assert 29 < budget.deadline - budget.started_at <= 30

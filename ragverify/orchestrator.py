@@ -633,7 +633,9 @@ class AdaptiveResearcher:
             self._warn("Web search returned no results (all backends failed or empty).", round_index)
             return []
 
-        pages = websearch.fetch_many(results, self.settings)
+        pages = websearch.fetch_many(
+            results, self.settings, breaker=self.breaker, deadline=self.budget.deadline
+        )
         if not pages:
             self._warn("Could not fetch any result pages; falling back to search snippets.", round_index)
         return _web_evidence(results[: self.settings.web_max_results], pages, self.settings, start_index)
