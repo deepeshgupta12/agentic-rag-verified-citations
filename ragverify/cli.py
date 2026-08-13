@@ -72,6 +72,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-local", action="store_true", help="ignore local documents")
     parser.add_argument("--no-embeddings", action="store_true", help="BM25 only, no embedding spend")
     parser.add_argument("--no-sanitize", action="store_true", help="skip prompt-injection neutralization")
+    parser.add_argument("--no-cache", action="store_true", help="ignore the embedding cache")
+    parser.add_argument("--telemetry", action="store_true", help="emit OpenTelemetry spans")
+    parser.add_argument("--otlp-endpoint", default=None, help="OTLP trace endpoint")
     parser.add_argument(
         "--multi-hop", action="store_true",
         help="plan chained retrieval for questions where one sub-question's query "
@@ -110,6 +113,12 @@ def main(argv: list[str] | None = None) -> int:
         overrides["rerank_method"] = args.rerank
     if args.multi_hop:
         overrides["use_multi_hop"] = True
+    if args.no_cache:
+        overrides["cache_embeddings"] = False
+    if args.telemetry:
+        overrides["telemetry"] = True
+    if args.otlp_endpoint:
+        overrides["otlp_endpoint"] = args.otlp_endpoint
     if args.always_answer:
         overrides["abstain_below_support"] = 0.0
     if args.max_cost:

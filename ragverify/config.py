@@ -105,6 +105,17 @@ class Settings:
     max_cost_usd: float = 1.00
     max_calls: int = 40
 
+    # --- persistence & observability -------------------------------------
+    # Embeddings are deterministic for a given (text, model), so a content
+    # hash is a complete cache key. Without this a 500-page corpus is
+    # re-embedded on every process start, paying full latency and full cost
+    # to recompute a value that has not changed.
+    cache_embeddings: bool = True
+    cache_dir: str | None = None
+    # OpenTelemetry spans. Off by default; the no-op path costs a null check.
+    telemetry: bool = False
+    otlp_endpoint: str | None = None
+
     # --- multi-hop -------------------------------------------------------
     # Sequential retrieval for questions where one sub-question's QUERY cannot
     # be written until another is answered ("which offices grew fastest" needs

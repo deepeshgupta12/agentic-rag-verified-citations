@@ -15,3 +15,7 @@ htmlcov/
 .vscode/
 evals/results/
 baseline.json
+
+# local embedding cache
+.cache/
+*.npz

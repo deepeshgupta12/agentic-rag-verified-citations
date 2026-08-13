@@ -34,12 +34,13 @@ import logging
 import time
 from collections.abc import Callable, Sequence
 
-from . import agents, sanitize, sourcequality, websearch
+from . import agents, sanitize, sourcequality, telemetry, websearch
 from . import coverage as coverage_mod
 from . import entailment as entailment_mod
 from . import grounding as grounding_mod
 from . import planner as planner_mod
 from . import rerank as rerank_mod
+from . import store as store_mod
 from .budget import Budget, BudgetExceeded, CircuitBreaker
 from .config import Settings
 from .ingest import Document, build_index, corpus_summary, top_terms
@@ -96,11 +97,37 @@ class Corpus:
 
         dense: DenseIndex | None = None
         embed_query = None
+        self.embedding_cache: store_mod.EmbeddingCache | None = None
         if settings.use_embeddings and client and self.chunks:
             try:
-                vectors = client.embed([c.text for c in self.chunks])
+                self.embedding_cache = store_mod.EmbeddingCache(
+                    settings.embed_model, settings.cache_dir, enabled=settings.cache_embeddings
+                )
+                with telemetry.span(
+                    "ragverify.embed_corpus",
+                    **{"ragverify.chunks": len(self.chunks),
+                       "gen_ai.request.model": settings.embed_model},
+                ) as sp:
+                    vectors = store_mod.embed_cached(
+                        [c.text for c in self.chunks], client, self.embedding_cache
+                    )
+                    telemetry.set_attributes(
+                        sp,
+                        **{"ragverify.cache_hits": self.embedding_cache.hits,
+                           "ragverify.cache_hit_rate": self.embedding_cache.hit_rate},
+                    )
+                self.embedding_cache.save()
+                if self.embedding_cache.hits:
+                    self.warnings.append(
+                        f"Reused {self.embedding_cache.hits} cached embedding(s) "
+                        f"({self.embedding_cache.hit_rate:.0%} hit rate)."
+                    )
                 dense = DenseIndex(self.chunks, vectors)
-                embed_query = lambda q: client.embed([q])[0]  # noqa: E731
+
+                # Query embeddings are cached too: refined and repeated
+                # queries recur constantly across rounds and sessions.
+                def embed_query(q, _client=client, _cache=self.embedding_cache):
+                    return store_mod.embed_cached([q], _client, _cache)[0]
             except Exception as exc:  # noqa: BLE001 - lexical-only is a fine corpus
                 self.warnings.append(f"Embeddings unavailable, using BM25 only ({exc}).")
                 if tracer:
@@ -216,6 +243,25 @@ class AdaptiveResearcher:
     # ------------------------------------------------------------------
 
     def run(self, question: str) -> ResearchResult:
+        """Public entry point: wraps the loop in a span when tracing is on."""
+        if self.settings.telemetry and not telemetry.enabled():
+            telemetry.configure(endpoint=self.settings.otlp_endpoint)
+
+        with telemetry.span("ragverify.run", **{"ragverify.question": question[:200]}) as sp:
+            telemetry.bridge(self.tracer)
+            result = self._run(question)
+            telemetry.set_attributes(
+                sp,
+                **{"ragverify.outcome": result.outcome.value,
+                   "ragverify.confidence": result.confidence,
+                   "ragverify.rounds": len(result.rounds),
+                   "gen_ai.usage.input_tokens": result.usage.prompt_tokens,
+                   "gen_ai.usage.output_tokens": result.usage.completion_tokens,
+                   "ragverify.cost_usd": result.usage.cost_usd},
+            )
+            return result
+
+    def _run(self, question: str) -> ResearchResult:
         started = time.time()
         settings = self.settings
         tracer = self.tracer
