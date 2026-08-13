@@ -28,7 +28,7 @@ import re
 from collections.abc import Iterable, Sequence
 
 from .retrieval import STOPWORDS, analyze
-from .schemas import Claim, EvidenceItem, GroundingReport
+from .schemas import AnswerAudit, Claim, EvidenceItem, GroundingReport
 
 # Numbers, percentages, years, money. These are what models most often
 # fabricate while otherwise paraphrasing the source correctly, and they are
@@ -83,32 +83,46 @@ def check(
 ) -> GroundingReport:
     """Partition ``claims`` into supported and unsupported.
 
-    A claim is supported when at least one of its citations both resolves to a
-    real evidence item and passes ``claim_support``. Citations naming an id
-    that was never retrieved are collected separately -- those are outright
-    fabrications and are reported to the verifier as such, because they mean
-    something stronger than "weak evidence".
+    Verification is **per citation**, not per claim. Accepting a claim because
+    *any* one of its citations supports it lets an irrelevant source ride along
+    on a good one and still be displayed to the user as a source for that
+    claim. Each citation is therefore tested independently, and a supported
+    claim keeps only the citations that actually carry it.
+
+    Citations are also rewritten to their resolved, canonical ids. Grounding
+    tolerates ``[S1]`` and ``S1.``; without rewriting, a downstream exact-match
+    lookup silently drops those and the citation disappears from the answer.
+
+    Citations naming an id that was never retrieved are collected separately --
+    those are outright fabrications, which is a stronger signal than "weak
+    evidence" and is reported to the verifier as such.
     """
     by_id: dict[str, EvidenceItem] = {e.source_id: e for e in evidence}
     supported: list[Claim] = []
     unsupported: list[Claim] = []
     hallucinated: list[str] = []
+    dropped: list[str] = []
 
     for claim in claims:
         if not claim.citations:
             unsupported.append(claim)
             continue
 
-        resolved: list[EvidenceItem] = []
+        supporting: list[str] = []
         for cid in claim.citations:
-            item = by_id.get(cid) or by_id.get(_normalize_id(cid, by_id))
+            canonical = cid if cid in by_id else _normalize_id(cid, by_id)
+            item = by_id.get(canonical)
             if item is None:
                 hallucinated.append(cid)
+            elif claim_support(claim.text, item.text, threshold)[0]:
+                if canonical not in supporting:
+                    supporting.append(canonical)
             else:
-                resolved.append(item)
+                # Resolves to a real passage that does not support the claim.
+                dropped.append(canonical)
 
-        if any(claim_support(claim.text, item.text, threshold)[0] for item in resolved):
-            supported.append(claim)
+        if supporting:
+            supported.append(claim.model_copy(update={"citations": supporting}))
         else:
             unsupported.append(claim)
 
@@ -116,6 +130,7 @@ def check(
         supported=supported,
         unsupported=unsupported,
         hallucinated_citations=sorted(set(hallucinated)),
+        dropped_citations=sorted(set(dropped)),
     )
 
 
@@ -134,6 +149,87 @@ def _normalize_id(cid: str, by_id: dict[str, EvidenceItem]) -> str:
         if key.upper() == stripped:
             return key
     return cid
+
+
+_SENTENCE = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"'\[])|\n+")
+_INLINE_CITE = re.compile(r"\[([A-Za-z]{1,2}\d{1,3}(?:\s*,\s*[A-Za-z]{1,2}\d{1,3})*)\]")
+
+
+def extract_inline_citations(text: str) -> list[str]:
+    """Pull ``[S1]`` / ``[S1, W2]`` style citation ids out of prose."""
+    out: list[str] = []
+    for match in _INLINE_CITE.finditer(text):
+        out.extend(part.strip().upper() for part in match.group(1).split(","))
+    return out
+
+
+def verify_answer(
+    answer: str,
+    evidence: Sequence[EvidenceItem],
+    threshold: float = DEFAULT_OVERLAP_THRESHOLD,
+) -> AnswerAudit:
+    """Re-verify the *final answer text* against the evidence.
+
+    This closes the gap that otherwise voids the entire guarantee. Grounding
+    validates the research agent's structured claims, and those claims shape
+    the synthesis prompt -- but the synthesizer emits free text, and a prompt
+    is a request, not a constraint. Nothing downstream re-read that text, so a
+    synthesizer that ignored its instructions could return an entirely
+    fabricated answer and the run would still report ``answered`` at ``high``
+    confidence, with a legitimate-looking source list beside it.
+
+    Every factual sentence is therefore re-parsed and re-checked here, against
+    the same immutable evidence, by the same deterministic test. A sentence
+    carrying a citation must be supported by at least one cited passage; a
+    citation that names an unretrieved source is a fabrication regardless of
+    what the sentence says.
+
+    Sentences with no citation at all are reported but not failed: headings,
+    transitions and the "what this doesn't cover" section legitimately carry
+    none. It is *cited* sentences that make verifiable assertions.
+    """
+    by_id = {e.source_id.upper(): e for e in evidence}
+    verified: list[str] = []
+    unverified: list[str] = []
+    uncited: list[str] = []
+    fabricated: list[str] = []
+
+    for raw in _SENTENCE.split(answer):
+        sentence = raw.strip()
+        if not sentence:
+            continue
+
+        cited = extract_inline_citations(sentence)
+
+        # A citation makes a sentence an assertion, whatever its length.
+        # Applying a length filter before this check let "Revenue fell 80%
+        # [S42]." -- 23 characters, entirely fabricated -- bypass the gate.
+        # Length only decides whether *uncited* prose is worth reporting.
+        if not cited:
+            if len(sentence) >= 25 and not sentence.lstrip().startswith(("#", "|", "---", "```")):
+                uncited.append(sentence)
+            continue
+
+        resolved = []
+        for cid in cited:
+            item = by_id.get(cid)
+            if item is None:
+                fabricated.append(cid)
+            else:
+                resolved.append(item)
+
+        prose = _INLINE_CITE.sub("", sentence)
+        if resolved and any(claim_support(prose, item.text, threshold)[0] for item in resolved):
+            verified.append(sentence)
+        else:
+            unverified.append(sentence)
+
+    return AnswerAudit(
+        verified_sentences=verified,
+        unverified_sentences=unverified,
+        uncited_sentences=uncited,
+        fabricated_citations=sorted(set(fabricated)),
+    )
 
 
 def strip_unsupported(answer: str, unsupported: Iterable[Claim]) -> str:

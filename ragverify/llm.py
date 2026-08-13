@@ -24,6 +24,7 @@ from typing import Any, TypeVar
 from pydantic import BaseModel, ValidationError
 
 from . import jsonx
+from .budget import Budget
 from .config import Settings
 from .schemas import Usage
 from .tokens import count_tokens, estimate_cost
@@ -58,8 +59,13 @@ class LLMClient:
     endpoint is selected by ``base_url`` alone.
     """
 
-    def __init__(self, settings: Settings, client: Any = None) -> None:
+    def __init__(self, settings: Settings, client: Any = None, budget: Budget | None = None) -> None:
         self.settings = settings
+        # Budget enforcement belongs at the call site, not at the loop
+        # boundary. Checking only before an extra round leaves triage,
+        # drafting, verification, repair turns, embeddings and synthesis
+        # entirely unmetered -- a run configured for 1 call happily made 4.
+        self.budget = budget
         self.usage = Usage()
         self._client = client or self._build_client(settings)
         # Set once we learn the model rejects response_format, so we stop
@@ -104,8 +110,12 @@ class LLMClient:
         if response_format and self._structured_supported is not False:
             kwargs["response_format"] = response_format
 
+        # Reserve before spending. A retry is a real request and must be
+        # counted, so the check sits inside the attempt loop.
         last: Exception | None = None
         for attempt in range(self.settings.max_retries):
+            if self.budget is not None:
+                self.budget.check()
             try:
                 response = self._client.chat.completions.create(**kwargs)
                 self._record(response, system + user)
@@ -144,6 +154,9 @@ class LLMClient:
                 calls=1,
             )
         )
+        if self.budget is not None:
+            self.budget.calls = self.usage.calls
+            self.budget.cost_usd = self.usage.cost_usd
 
     # ------------------------------------------------------------------
     # Structured output
@@ -211,6 +224,8 @@ class LLMClient:
         """Embed ``texts``, batched to stay under request size limits."""
         vectors: list[list[float]] = []
         for start in range(0, len(texts), batch_size):
+            if self.budget is not None:
+                self.budget.check()
             batch = [t or " " for t in texts[start : start + batch_size]]
             response = self._client.embeddings.create(model=self.settings.embed_model, input=batch)
             vectors.extend(item.embedding for item in response.data)

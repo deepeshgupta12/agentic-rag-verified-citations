@@ -19,14 +19,20 @@ import logging
 import re
 import time
 from collections.abc import Sequence
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
+from .budget import CircuitBreaker
 from .config import Settings
 from .schemas import WebResult
 
 log = logging.getLogger("ragverify.web")
 
-_UA = "Mozilla/5.0 (compatible; RagVerify/2.0; +https://github.com/ragverify)"
+_UA = "Mozilla/5.0 (compatible; RagVerify/1.0)"
+
+# Bounds on a single fetch. A retrieved page is untrusted input, so its size
+# and redirect depth are ours to cap, not the server's to choose.
+MAX_RESPONSE_BYTES = 5 * 1024 * 1024
+MAX_REDIRECTS = 5
 
 _SCRIPT_STYLE = re.compile(r"<(script|style|noscript|svg|head)[^>]*>.*?</\1>", re.DOTALL | re.I)
 _TAGS = re.compile(r"<[^>]+>")
@@ -47,27 +53,47 @@ def _requests():
     return requests
 
 
-def search(query: str, settings: Settings) -> list[WebResult]:
+def search(query: str, settings: Settings, breaker: CircuitBreaker | None = None) -> list[WebResult]:
     """Query SearxNG instances in order, then fall back to DuckDuckGo.
 
     Returns an empty list rather than raising when everything fails, so a dead
     network downgrades the run to local-only instead of ending it. The caller
     records a warning and the verifier sees the reduced evidence.
+
+    ``breaker`` short-circuits endpoints already known to be down *this run*.
+    Without it, a run where every backend is unreachable pays the full ladder
+    -- 4 backends x 3 retries x backoff -- on every sub-query, having already
+    learned the answer on the first. An observed eval run spent roughly two
+    minutes per web case doing exactly that.
     """
     for endpoint in settings.searx_endpoints:
+        if breaker is not None and breaker.is_open(endpoint):
+            log.info("skipping %s: circuit open", endpoint)
+            continue
         try:
             results = _searxng(query, endpoint, settings)
             if results:
                 log.info("searxng %s returned %d results", endpoint, len(results))
+                if breaker is not None:
+                    breaker.record_success(endpoint)
                 return results
         except Exception as exc:  # noqa: BLE001 - try the next endpoint
             log.warning("searxng %s failed: %s", endpoint, exc)
+            if breaker is not None:
+                breaker.record_failure(endpoint)
             continue
 
+    if breaker is not None and breaker.is_open("duckduckgo"):
+        return []
     try:
-        return _duckduckgo(query, settings)
+        results = _duckduckgo(query, settings)
+        if breaker is not None:
+            breaker.record_success("duckduckgo")
+        return results
     except Exception as exc:  # noqa: BLE001
         log.warning("duckduckgo fallback failed: %s", exc)
+        if breaker is not None:
+            breaker.record_failure("duckduckgo")
         return []
 
 
@@ -150,25 +176,112 @@ def _strip_html(fragment: str) -> str:
     return _WS.sub(" ", html.unescape(_TAGS.sub(" ", fragment))).strip()
 
 
+class UnsafeURL(ValueError):
+    """The URL resolves somewhere the fetcher must not go."""
+
+
+def _assert_safe_url(url: str) -> None:
+    """Reject URLs that would turn the fetcher into an SSRF primitive.
+
+    Search results are attacker-influenceable: getting a page into a result
+    set, or onto a page that redirects, is enough to choose the address this
+    process connects to. Without validation that is a request forgery gadget
+    aimed at whatever the host can reach -- cloud metadata endpoints
+    (169.254.169.254), localhost admin panels, private RFC1918 services.
+
+    Every resolved address is checked, not just the hostname, because DNS can
+    return a private address for a public name. This narrows but does not
+    close DNS rebinding, where the address changes between this check and the
+    connection; defeating that needs connection-time pinning.
+    """
+    import ipaddress
+    import socket
+
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise UnsafeURL(f"scheme {parsed.scheme!r} not allowed")
+
+    host = parsed.hostname
+    if not host:
+        raise UnsafeURL("no host")
+
+    try:
+        infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80))
+    except socket.gaierror as exc:
+        raise UnsafeURL(f"cannot resolve {host}") from exc
+
+    for info in infos:
+        address = ipaddress.ip_address(info[4][0])
+        if (
+            address.is_private
+            or address.is_loopback
+            or address.is_link_local      # 169.254.0.0/16 — cloud metadata
+            or address.is_reserved
+            or address.is_multicast
+            or address.is_unspecified
+        ):
+            raise UnsafeURL(f"{host} resolves to non-public address {address}")
+
+
 def fetch_page(url: str, settings: Settings, max_chars: int = 20_000) -> str:
     """Fetch and extract readable text from ``url``. Empty string on failure.
 
     Deliberately dependency-free rather than pulling in trafilatura: the goal
     is enough clean text for BM25 and for grounding to check a claim against,
     not perfect article extraction.
+
+    Redirects are followed manually so each hop is validated. Handing
+    ``allow_redirects=True`` to requests means only the *first* URL is ever
+    checked, and a public URL that 302s to ``127.0.0.1`` walks straight past
+    the guard.
     """
     requests = _requests()
+    current = url
     try:
-        response = requests.get(
-            url,
-            headers={"User-Agent": _UA, "Accept": "text/html,application/xhtml+xml"},
-            timeout=settings.request_timeout_s,
-            allow_redirects=True,
-        )
-        response.raise_for_status()
-        if "html" not in response.headers.get("Content-Type", "").lower():
-            return ""
-        return _extract_text(response.text)[:max_chars]
+        for _hop in range(MAX_REDIRECTS):
+            _assert_safe_url(current)
+            response = requests.get(
+                current,
+                headers={"User-Agent": _UA, "Accept": "text/html,application/xhtml+xml"},
+                timeout=settings.request_timeout_s,
+                allow_redirects=False,
+                stream=True,
+            )
+
+            if response.is_redirect or response.status_code in (301, 302, 303, 307, 308):
+                location = response.headers.get("Location")
+                if not location:
+                    return ""
+                current = urljoin(current, location)
+                response.close()
+                continue
+
+            response.raise_for_status()
+            if "html" not in response.headers.get("Content-Type", "").lower():
+                return ""
+
+            # Cap the body before it is in memory. Content-Length is a claim,
+            # not a guarantee, so the stream is truncated as it arrives.
+            declared = int(response.headers.get("Content-Length") or 0)
+            if declared and declared > MAX_RESPONSE_BYTES:
+                log.info("skipping %s: declared %d bytes", current, declared)
+                return ""
+
+            chunks: list[bytes] = []
+            total = 0
+            for chunk in response.iter_content(8192):
+                chunks.append(chunk)
+                total += len(chunk)
+                if total > MAX_RESPONSE_BYTES:
+                    break
+            body = b"".join(chunks).decode(response.encoding or "utf-8", errors="replace")
+            return _extract_text(body)[:max_chars]
+
+        log.info("too many redirects for %s", url)
+        return ""
+    except UnsafeURL as exc:
+        log.warning("blocked unsafe fetch %s: %s", url, exc)
+        return ""
     except Exception as exc:  # noqa: BLE001 - a dead link is not a run failure
         log.info("fetch failed for %s: %s", url, exc)
         return ""

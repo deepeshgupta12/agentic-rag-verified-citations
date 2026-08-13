@@ -19,6 +19,7 @@ from ragverify.orchestrator import AdaptiveResearcher, Corpus
 from ragverify.schemas import (
     Claim,
     NextAction,
+    Outcome,
     ResearchDraft,
     Route,
     TriageDecision,
@@ -39,17 +40,21 @@ class FakeLLM(LLMClient):
     path are all exercised rather than stubbed out.
     """
 
-    def __init__(self, settings: Settings, script: list[Any]):
+    def __init__(self, settings: Settings, script: list[Any], budget=None):
         self.settings = settings
         from ragverify.schemas import Usage
 
         self.usage = Usage()
+        self.budget = budget
         self._structured_supported = None
         self._client = None
         self.script = list(script)
         self.prompts: list[str] = []
 
     def complete(self, system: str, user: str, **kwargs) -> str:
+        # Mirror the real client: budget is enforced per call, not per round.
+        if self.budget is not None:
+            self.budget.check()
         self.prompts.append(user)
         if not self.script:
             return "Final synthesized answer."
@@ -74,6 +79,9 @@ class FakeLLM(LLMClient):
                 calls=1,
             )
         )
+        if self.budget is not None:
+            self.budget.calls = self.usage.calls
+            self.budget.cost_usd = self.usage.cost_usd
         return out
 
     def embed(self, texts, batch_size: int = 96):
@@ -344,13 +352,21 @@ class TestResilience:
         assert result.rounds[0].verifier.verdict is Verdict.PARTIAL
         assert result.confidence != "high", "an unverified answer must not claim high confidence"
 
-    def test_no_evidence_returns_an_honest_answer(self):
+    def test_no_evidence_abstains_rather_than_answering(self):
+        """Zero evidence must not report `answered`.
+
+        The message body said evidence could not be found while the outcome
+        said ANSWERED, so any caller branching on `is_answer` treated a
+        non-answer as a result.
+        """
         cfg = settings(web_enabled=False)
         llm = FakeLLM(cfg, [triage()])
         result = AdaptiveResearcher(cfg, llm, corpus=None).run(QUESTION)
+
         assert result.rounds == []
+        assert result.outcome is Outcome.ABSTAINED
+        assert not result.is_answer, "outcome must not contradict the message body"
         assert result.confidence == "low"
-        assert "could not find evidence" in result.final_answer.lower()
 
     def test_usage_is_accumulated(self):
         cfg = settings()

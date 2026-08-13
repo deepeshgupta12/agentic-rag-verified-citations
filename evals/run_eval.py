@@ -57,6 +57,10 @@ class CaseResult:
     cost_usd: float = 0.0
     elapsed_s: float = 0.0
     error: str = ""
+    route_exact: bool = False
+    route_over_retrieved: bool = False
+    answer_verified_rate: float = 0.0
+    fabricated_citations: int = 0
     notes: list[str] = field(default_factory=list)
 
 
@@ -102,10 +106,15 @@ def run_case(case: dict[str, Any], settings: Settings) -> CaseResult:
     checks = result.checks
 
     if expected := case.get("expect_route"):
-        # Hybrid satisfies a local or web expectation: it retrieves from both,
-        # so it is never *wrong*, only more expensive than necessary.
-        checks["route"] = result.route == expected or result.route == "hybrid"
-        if result.route == "hybrid" and expected != "hybrid":
+        # Counting hybrid as correct for a local-or-web expectation inflates
+        # route accuracy: hybrid always retrieves from both, so it can never
+        # be scored wrong, and a router that always answered "hybrid" would
+        # report 100%. Exact match is the metric; hybrid is tracked separately
+        # as over-retrieval, which is a cost problem rather than an error.
+        checks["route"] = result.route == expected
+        result.route_exact = result.route == expected
+        result.route_over_retrieved = result.route == "hybrid" and expected != "hybrid"
+        if result.route_over_retrieved:
             result.notes.append(f"routed hybrid where {expected} would have sufficed")
 
     if expected := case.get("expect_outcome"):
@@ -134,6 +143,20 @@ def run_case(case: dict[str, Any], settings: Settings) -> CaseResult:
     if run.is_answer and last and last.grounding and last.grounding.total:
         checks["grounded"] = last.grounding.support_rate >= settings.min_support_rate
 
+    # Citation VALIDITY, not just fact presence. A substring check confirms a
+    # number appears somewhere in the prose; it says nothing about whether the
+    # inline citations resolve or whether the cited passage supports the
+    # sentence. That is the guarantee this project makes, so it is measured.
+    if run.is_answer and run.answer_audit is not None:
+        audit = run.answer_audit
+        result.answer_verified_rate = round(audit.verified_rate, 3)
+        result.fabricated_citations = len(audit.fabricated_citations)
+        checks["no_fabricated_citations"] = not audit.fabricated_citations
+        if audit.total_cited:
+            checks["answer_citations_supported"] = audit.verified_rate >= 0.8
+        if case.get("require_clean_audit"):
+            checks["clean_audit"] = audit.is_clean
+
     result.passed = all(checks.values()) if checks else False
     return result
 
@@ -152,8 +175,15 @@ def summarize(results: list[CaseResult]) -> dict[str, Any]:
         "passed": passed,
         "pass_rate": round(passed / total, 3) if total else 0.0,
         "route_accuracy": round(
-            sum(r.checks.get("route", False) for r in routed) / len(routed), 3
+            sum(r.route_exact for r in routed) / len(routed), 3
         ) if routed else None,
+        "route_over_retrieval": round(
+            sum(r.route_over_retrieved for r in routed) / len(routed), 3
+        ) if routed else None,
+        "answer_citation_validity": round(
+            sum(r.answer_verified_rate for r in answered) / len(answered), 3
+        ) if (answered := [r for r in results if r.answer_verified_rate or r.outcome == "answered"]) else None,
+        "fabricated_citation_cases": sum(bool(r.fabricated_citations) for r in results),
         "abstain_precision": round(
             sum(r.outcome == "abstained" for r in abstain_cases) / len(abstain_cases), 3
         ) if abstain_cases else None,

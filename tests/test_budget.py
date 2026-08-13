@@ -101,3 +101,45 @@ class TestCircuitBreaker:
         breaker.record_failure("searx")
         breaker.record_failure("ddg")
         assert set(breaker.open_circuits()) == {"searx", "ddg"}
+
+
+class TestBreakerWiredIntoSearch:
+    """The breaker existed but was never connected to a dependency."""
+
+    def test_open_circuit_skips_the_endpoint(self, monkeypatch):
+        from ragverify import websearch
+        from ragverify.config import Settings
+
+        attempted: list[str] = []
+
+        def fake_searx(query, endpoint, settings):
+            attempted.append(endpoint)
+            raise RuntimeError("down")
+
+        monkeypatch.setattr(websearch, "_searxng", fake_searx)
+        monkeypatch.setattr(websearch, "_duckduckgo", lambda q, s: [])
+
+        cfg = Settings(searx_endpoints=("https://a.test", "https://b.test"))
+        breaker = CircuitBreaker(threshold=1)
+
+        websearch.search("q1", cfg, breaker)
+        first_round = len(attempted)
+        websearch.search("q2", cfg, breaker)
+
+        assert first_round == 2, "both endpoints tried on the first query"
+        assert len(attempted) == 2, "second query must skip endpoints already known down"
+
+    def test_success_keeps_the_circuit_closed(self, monkeypatch):
+        from ragverify import websearch
+        from ragverify.config import Settings
+        from ragverify.schemas import WebResult
+
+        monkeypatch.setattr(
+            websearch, "_searxng",
+            lambda q, e, s: [WebResult(url="https://x.test", title="t")],
+        )
+        cfg = Settings(searx_endpoints=("https://a.test",))
+        breaker = CircuitBreaker(threshold=1)
+
+        assert websearch.search("q1", cfg, breaker)
+        assert websearch.search("q2", cfg, breaker), "a working endpoint stays available"

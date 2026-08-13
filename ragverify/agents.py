@@ -310,3 +310,31 @@ ROLE_SCHEMAS = {
     "research": ResearchDraft,
     "verifier": VerifierReport,
 }
+
+
+def resynthesis_prompt(original_prompt: str, audit) -> str:
+    """Corrective turn after the final answer failed verification.
+
+    Shows the model the specific sentences that failed and why, rather than
+    re-asking the same question and hoping for a better sample.
+    """
+    failed = "\n".join(f"  - {s}" for s in audit.unverified_sentences[:8]) or "  (none)"
+    fabricated = ", ".join(audit.fabricated_citations) or "(none)"
+    return f"""{original_prompt}
+
+--- YOUR PREVIOUS ANSWER FAILED VERIFICATION ---
+
+Each sentence below carried a citation, but the cited passage does not support
+it. Every one was checked mechanically against the source text:
+
+{failed}
+
+Citations naming sources that do not exist: {fabricated}
+
+Rewrite the answer. Rules:
+- State only what the verified claims above support.
+- Cite the source id that actually contains each statement.
+- Never cite an id that is not in the evidence list.
+- If a point cannot be supported, omit it or move it to what this doesn't cover.
+- A shorter, fully supported answer is the correct outcome here.
+"""

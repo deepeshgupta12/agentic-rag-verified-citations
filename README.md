@@ -139,7 +139,7 @@ Every passage keeps a stable chunk id, page number and URL. Web results aren't j
 
 Chunks are sized in tokens and split on paragraph boundaries, then packed whole against a token budget. Nothing is silently truncated on its way into a prompt.
 
-### 4. Grounding is deterministic
+### 4. Grounding is deterministic — twice
 
 Each claim is checked against the text of the sources it cites:
 
@@ -150,6 +150,12 @@ Each claim is checked against the text of the sources it cites:
 That last one matters most. A claim asserting *"revenue grew 34%"* against a source that never says 34 is rejected regardless of how well the surrounding prose matches — which is exactly the shape of the most convincing hallucinations.
 
 Unsupported claims are excluded from the final answer. The synthesizer is told which claims failed and is forbidden from restating them as fact.
+
+**The final answer is then re-verified.** Telling the synthesizer what to write is a request, not a constraint — it emits free text, and free text can ignore its instructions. So the answer that actually reaches you is parsed again, sentence by sentence, and every inline citation is re-checked against the same evidence. A sentence carrying a citation the passage does not support fails. One corrective regeneration is attempted; if that also fails, the answer is replaced by a deterministic rendering of the verified claims, and confidence is capped.
+
+Verification that stops before the thing the user reads is not verification.
+
+Per-citation, not per-claim: a claim citing one good source and one irrelevant one keeps only the good one. Accepting the claim wholesale would display the irrelevant source to you as evidence for it.
 
 ### 5. Escalation, then abstention
 
@@ -253,10 +259,12 @@ Deeper design notes in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 Worth knowing before you rely on it:
 
-- **Grounding is a recall filter, not an entailment model.** It catches fabricated citations, irrelevant sources and invented numbers. It does *not* catch a subtle misreading of text that is genuinely present. A cross-encoder or NLI model is the obvious next upgrade.
+- **Grounding is a recall filter, not an entailment model.** It catches fabricated citations, irrelevant sources and invented numbers. It does *not* catch a subtle misreading of text that is genuinely present — "revenue grew in most regions" cited for "revenue grew in all regions" passes, because every word matches. A cross-encoder or NLI model is the obvious next upgrade and the highest-value one.
 - **Coverage thresholds are tuned on a 12-case eval set.** `STRONG = 0.55` / `WEAK = 0.28` are calibrated so BM25's corpus-size sensitivity doesn't misread small corpora. Re-tune them on your data.
 - **The stemmer is a light suffix stripper.** It bridges `requirement`/`requirements`, not `grew`/`growth`. Dense retrieval covers most of that gap when enabled.
 - **Injection defence raises cost, it doesn't eliminate risk.** A novel phrasing can still get through the pattern layer.
+- **SSRF protection resolves addresses at validation time.** Every redirect hop is re-checked and private, loopback, link-local and reserved ranges are refused, but DNS rebinding — where the address changes between the check and the connection — needs connection-time pinning, which this does not do.
+- **Measured on a 12-case eval set.** Latest run: route accuracy 1.0, injection detection 1.0, abstention precision 1.0, at ~$0.01 and ~90s per case. Twelve synthetic cases is a small sample and the numbers should be read as a smoke test, not a benchmark.
 - **Orchestration uses typed direct calls, not AG2 handoffs.** The loop branches on validated Pydantic objects and that control flow is easier to read and test in one file. [`ag2_team.py`](ragverify/ag2_team.py) uses a real AG2 `GroupChat` where conversation genuinely helps — adversarial critic/defender review, where the disagreement *is* the signal.
 
 ## Roadmap
@@ -265,7 +273,10 @@ Worth knowing before you rely on it:
 - OpenTelemetry spans per agent, model call and handoff
 - Persistent vector store for corpora that outlive a session
 - Multi-hop decomposition for questions needing chained retrieval
-- Expanded eval set with human-labelled groundedness
+- Expanded eval set with human-labelled groundedness, covering contradictions, tables, scanned PDFs, multilingual sources, temporal questions and multi-hop answers
+- An immutable evidence ledger: content hashes, raw and sanitised text, retrieval timestamps, page/span offsets and claim-to-source edges, so a run is auditable after the fact
+- Source quality, freshness, domain-diversity and corroboration rules for web evidence
+- Connection-time address pinning to close DNS rebinding
 
 ## License
 

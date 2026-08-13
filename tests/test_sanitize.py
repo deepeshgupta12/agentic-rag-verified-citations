@@ -8,6 +8,8 @@ failure.
 
 from __future__ import annotations
 
+import pytest
+
 from ragverify.sanitize import (
     BOUNDARY_PREAMBLE,
     FENCE,
@@ -132,3 +134,42 @@ class TestSanitizeEvidence:
         cleaned, detections = sanitize_evidence([])
         assert cleaned == [] and detections == []
         assert summarize([]) == ""
+
+
+class TestSSRF:
+    """The fetcher must not become a request-forgery gadget.
+
+    Search results are attacker-influenceable, so the address this process
+    connects to is partly attacker-chosen.
+    """
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://169.254.169.254/latest/meta-data/",   # cloud metadata
+            "http://127.0.0.1:8080/admin",
+            "http://localhost/internal",
+            "http://10.0.0.5/secrets",
+            "http://192.168.1.1/router",
+            "http://[::1]/loopback",
+            "file:///etc/passwd",
+            "gopher://evil.test/",
+        ],
+    )
+    def test_blocked_targets(self, url):
+        from ragverify.websearch import UnsafeURL, _assert_safe_url
+
+        with pytest.raises(UnsafeURL):
+            _assert_safe_url(url)
+
+    def test_public_url_allowed(self):
+        from ragverify.websearch import _assert_safe_url
+
+        _assert_safe_url("https://example.com/article")  # must not raise
+
+    def test_fetch_returns_empty_for_blocked_url(self):
+        from ragverify.config import Settings
+        from ragverify.websearch import fetch_page
+
+        # Blocked before any socket is opened; a dead fetch is not a crash.
+        assert fetch_page("http://169.254.169.254/latest/meta-data/", Settings()) == ""

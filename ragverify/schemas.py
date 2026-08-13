@@ -178,7 +178,11 @@ class GroundingReport(BaseModel):
 
     supported: list[Claim] = Field(default_factory=list)
     unsupported: list[Claim] = Field(default_factory=list)
+    # Citations naming a source that was never retrieved: outright fabrication.
     hallucinated_citations: list[str] = Field(default_factory=list)
+    # Citations resolving to a real passage that does not support the claim.
+    # Distinct from fabrication and a weaker signal, but still removed.
+    dropped_citations: list[str] = Field(default_factory=list)
 
     @property
     def total(self) -> int:
@@ -192,6 +196,36 @@ class GroundingReport(BaseModel):
 # --------------------------------------------------------------------------
 # Run-level results
 # --------------------------------------------------------------------------
+
+
+class AnswerAudit(BaseModel):
+    """Re-verification of the final answer text itself.
+
+    Grounding checks the research agent's structured claims. Those claims shape
+    the synthesis prompt, but a prompt is a request, not a constraint -- the
+    synthesizer emits free text. This audits that text against the same
+    evidence so the user-visible answer is mechanically verified, not merely
+    verified upstream of the thing the user reads.
+    """
+
+    verified_sentences: list[str] = Field(default_factory=list)
+    unverified_sentences: list[str] = Field(default_factory=list)
+    # Headings, transitions and disclosure sections carry no citations by
+    # design; reported for transparency, not counted as failures.
+    uncited_sentences: list[str] = Field(default_factory=list)
+    fabricated_citations: list[str] = Field(default_factory=list)
+
+    @property
+    def total_cited(self) -> int:
+        return len(self.verified_sentences) + len(self.unverified_sentences)
+
+    @property
+    def verified_rate(self) -> float:
+        return len(self.verified_sentences) / self.total_cited if self.total_cited else 0.0
+
+    @property
+    def is_clean(self) -> bool:
+        return not self.unverified_sentences and not self.fabricated_citations
 
 
 class RoundRecord(BaseModel):
@@ -254,6 +288,8 @@ class ResearchResult(BaseModel):
     # Prompt-injection patterns found in retrieved text and neutralized.
     injections_detected: list[str] = Field(default_factory=list)
     clarifying_question: str | None = None
+    # Re-verification of the answer text the user actually sees.
+    answer_audit: AnswerAudit | None = None
     budget: dict[str, float] = Field(default_factory=dict)
     elapsed_s: float = 0.0
 

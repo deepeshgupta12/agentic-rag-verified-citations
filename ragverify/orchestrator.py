@@ -37,12 +37,13 @@ from collections.abc import Callable, Sequence
 from . import agents, sanitize, websearch
 from . import coverage as coverage_mod
 from . import grounding as grounding_mod
-from .budget import Budget, CircuitBreaker
+from .budget import Budget, BudgetExceeded, CircuitBreaker
 from .config import Settings
 from .ingest import Document, build_index, corpus_summary, top_terms
 from .llm import LLMClient, LLMError, SchemaError
 from .retrieval import DenseIndex, HybridRetriever
 from .schemas import (
+    AnswerAudit,
     Chunk,
     EvidenceItem,
     GroundingReport,
@@ -177,6 +178,15 @@ class AdaptiveResearcher:
         )
         self.breaker = CircuitBreaker()
         self.injections: list[str] = []
+        # Set when synthesis had to be replaced by a deterministic
+        # rendering. The content is verified, but generation proved
+        # unreliable, and confidence should say so.
+        self.synthesis_degraded = False
+        # One budget object, shared. Without this the client meters its own
+        # calls while the loop meters a different counter, and neither sees
+        # the whole run.
+        if client.budget is None:
+            client.budget = self.budget
 
     # ------------------------------------------------------------------
 
@@ -322,6 +332,16 @@ class AdaptiveResearcher:
         # Abstain rather than answer when nothing survived grounding. An
         # answer built on zero verified claims is worse than none: it reads
         # exactly like a good one.
+        # No evidence at all is an abstention, not an answer. Reporting
+        # ANSWERED here contradicts the message body, and any caller
+        # branching on `is_answer` would treat a non-answer as a result.
+        if not rounds or not evidence:
+            self._warn("No evidence was retrieved; abstaining.")
+            return self._abstain_result(
+                question, triage, started, Outcome.ABSTAINED,
+                rounds=rounds, gaps=verifier.gaps,
+            )
+
         if self._should_abstain(rounds, grounding, evidence):
             return self._abstain_result(
                 question,
@@ -332,7 +352,7 @@ class AdaptiveResearcher:
                 gaps=verifier.gaps,
             )
 
-        final_answer, confidence = self._synthesize(question, grounding, evidence, verifier)
+        final_answer, confidence, audit = self._synthesize(question, grounding, evidence, verifier)
 
         if budget_stopped:
             outcome = Outcome.BUDGET
@@ -355,6 +375,7 @@ class AdaptiveResearcher:
             open_gaps=verifier.gaps,
             warnings=self.warnings + (self.corpus.retriever.warnings if self.corpus else []),
             injections_detected=sorted(set(self.injections)),
+            answer_audit=audit,
             budget=self.budget.snapshot(),
             elapsed_s=round(time.time() - started, 2),
         )
@@ -479,7 +500,7 @@ class AdaptiveResearcher:
                 agents.triage_prompt(question, summary, terms, cov, suggested, reason),
                 TriageDecision,
             )
-        except (LLMError, SchemaError) as exc:
+        except (LLMError, SchemaError, BudgetExceeded) as exc:
             # A failed triage is recoverable: fall back to the measurement,
             # which needed no model call in the first place.
             self._warn(f"Triage agent failed ({exc}); using the measured route.")
@@ -570,7 +591,7 @@ class AdaptiveResearcher:
         results: list[WebResult] = []
         seen: set[str] = set()
         for q in queries:
-            for result in websearch.search(q, self.settings):
+            for result in websearch.search(q, self.settings, self.breaker):
                 if result.url not in seen:
                     seen.add(result.url)
                     results.append(result)
@@ -593,7 +614,7 @@ class AdaptiveResearcher:
                 agents.research_prompt(question, evidence, self.settings.evidence_token_budget),
                 ResearchDraft,
             )
-        except (LLMError, SchemaError) as exc:
+        except (LLMError, SchemaError, BudgetExceeded) as exc:
             self._warn(f"Research agent failed: {exc}")
             return ResearchDraft(unanswered=["The research step failed to produce a draft."])
 
@@ -619,7 +640,7 @@ class AdaptiveResearcher:
                 ),
                 VerifierReport,
             )
-        except (LLMError, SchemaError) as exc:
+        except (LLMError, SchemaError, BudgetExceeded) as exc:
             # Fail closed on the *quality* judgement but open on control flow:
             # without a verdict we cannot claim sufficiency, yet blocking the
             # loop entirely would return nothing at all.
@@ -704,7 +725,7 @@ class AdaptiveResearcher:
         grounding: GroundingReport,
         evidence: Sequence[EvidenceItem],
         verifier: VerifierReport,
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, AnswerAudit | None]:
         if not grounding.supported and not evidence:
             return (
                 "I could not find evidence to answer this question. "
@@ -712,28 +733,108 @@ class AdaptiveResearcher:
                    if not self._web_available()
                    else "Neither the uploaded documents nor web search returned relevant material."),
                 "low",
+                None,
             )
 
         self.tracer.emit(EventKind.SYNTHESIZE, "Writing final answer")
-        try:
-            answer = self.client.complete(
-                agents.SYNTHESIZER_SYSTEM,
-                agents.synthesis_prompt(
-                    question, grounding, evidence, verifier, self.settings.evidence_token_budget
-                ),
+        prompt = agents.synthesis_prompt(
+            question, grounding, evidence, verifier, self.settings.evidence_token_budget
+        )
+
+        answer = ""
+        audit: AnswerAudit | None = None
+
+        # The synthesis prompt is a request, not a constraint. Audit the text
+        # that actually comes back, and give the model one corrective turn
+        # before falling back to something deterministic.
+        for attempt in range(2):
+            try:
+                answer = self.client.complete(agents.SYNTHESIZER_SYSTEM, prompt)
+            except (LLMError, BudgetExceeded) as exc:
+                self._warn(f"Synthesis failed ({exc}); rendering verified claims directly.")
+                self.synthesis_degraded = True
+                return self._render_claims(grounding), "low", None
+
+            audit = grounding_mod.verify_answer(answer, evidence)
+            self.tracer.emit(
+                EventKind.VERIFY,
+                f"Answer audit: {len(audit.verified_sentences)}/{audit.total_cited} cited "
+                f"sentences verified"
+                + (f", fabricated: {', '.join(audit.fabricated_citations)}"
+                   if audit.fabricated_citations else ""),
+                data={"verified_rate": audit.verified_rate},
             )
-        except LLMError as exc:
-            self._warn(f"Synthesis failed ({exc}); returning verified claims directly.")
-            answer = "\n".join(f"- {c.text} {c.citations}" for c in grounding.supported)
 
-        return answer, self._confidence(grounding, verifier)
+            if audit.is_clean or attempt == 1:
+                break
 
-    def _confidence(self, grounding: GroundingReport, verifier: VerifierReport) -> str:
+            self._warn(
+                f"Final answer failed verification "
+                f"({audit.verified_rate:.0%} of cited sentences supported); regenerating."
+            )
+            prompt = agents.resynthesis_prompt(prompt, audit)
+
+        if audit is not None and audit.total_cited and audit.verified_rate < 0.5:
+            # Two attempts produced text the evidence does not support. Falling
+            # back to a deterministic rendering of the verified claims is the
+            # only option that keeps the guarantee intact.
+            self._warn(
+                f"Synthesis could not be verified after 2 attempts "
+                f"({audit.verified_rate:.0%}); rendering verified claims instead."
+            )
+            self.synthesis_degraded = True
+            answer = self._render_claims(grounding)
+            audit = grounding_mod.verify_answer(answer, evidence)
+
+        return answer, self._confidence(grounding, verifier, audit), audit
+
+    @staticmethod
+    def _render_claims(grounding: GroundingReport) -> str:
+        """Deterministic answer built only from verified claims.
+
+        The escape hatch when generation cannot be trusted: every line here
+        came through grounding, so it cannot contain an unsupported assertion.
+        """
+        if not grounding.supported:
+            return (
+                "No claim in the drafted answer could be verified against the retrieved "
+                "sources, so there is nothing here I can state as fact."
+            )
+        lines = ["Based only on claims verified against the sources:", ""]
+        lines += [f"- {c.text} {' '.join(f'[{cid}]' for cid in c.citations)}" for c in grounding.supported]
+        return "\n".join(lines)
+
+    def _confidence(
+        self,
+        grounding: GroundingReport,
+        verifier: VerifierReport,
+        audit: AnswerAudit | None = None,
+    ) -> str:
+        """Confidence reflects the text the user reads, not just the draft.
+
+        A high upstream support rate means nothing if the answer that was
+        actually emitted does not hold up, so the audit can only lower the
+        grade, never raise it.
+        """
         if verifier.verdict is Verdict.SUFFICIENT and grounding.support_rate >= 0.8:
-            return "high"
-        if verifier.verdict is Verdict.INSUFFICIENT or grounding.support_rate < 0.5:
-            return "low"
-        return "medium"
+            level = "high"
+        elif verifier.verdict is Verdict.INSUFFICIENT or grounding.support_rate < 0.5:
+            level = "low"
+        else:
+            level = "medium"
+
+        if audit is not None and audit.total_cited:
+            if audit.fabricated_citations or audit.verified_rate < 0.5:
+                return "low"
+            if audit.verified_rate < 0.8 and level == "high":
+                level = "medium"
+
+        # Every line of a fallback rendering is verified, but the run reached
+        # it only because generation twice produced unsupported text. Reporting
+        # "high" would hide that.
+        if self.synthesis_degraded and level == "high":
+            return "medium"
+        return level
 
     @staticmethod
     def _cited(evidence: Sequence[EvidenceItem], grounding: GroundingReport) -> list[EvidenceItem]:

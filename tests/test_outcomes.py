@@ -19,7 +19,15 @@ from test_orchestrator import (
 from ragverify.budget import Budget
 from ragverify.ingest import Document
 from ragverify.orchestrator import AdaptiveResearcher, Corpus
-from ragverify.schemas import Claim, NextAction, Outcome, ResearchDraft, Route, Verdict
+from ragverify.schemas import (
+    Claim,
+    EvidenceItem,
+    NextAction,
+    Outcome,
+    ResearchDraft,
+    Route,
+    Verdict,
+)
 
 
 class TestAbstention:
@@ -225,3 +233,120 @@ class TestCoverageRouting:
         result = AdaptiveResearcher(cfg, llm, corpus_for(cfg)).run(QUESTION)
         assert result.triage.measured_coverage is not None
         assert result.triage.measured_coverage > 0
+
+
+class TestFinalAnswerVerification:
+    """The user-visible answer must itself be mechanically verified.
+
+    Grounding validates the research agent's structured claims, and those
+    claims shape the synthesis prompt -- but a prompt is a request, not a
+    constraint. Without this gate a synthesizer that ignored its instructions
+    returned a fabricated answer as `answered` at `high` confidence.
+    """
+
+    def test_fabricated_final_answer_is_caught(self):
+        cfg = settings(max_rounds=1)
+        llm = FakeLLM(cfg, [
+            triage(),
+            GOOD_DRAFT,
+            verdict(Verdict.SUFFICIENT, NextAction.ANSWER),
+            "The CEO resigned in October [S99]. Revenue fell 80% [S42].",  # attempt 1
+            "The CEO resigned in October [S99]. Revenue fell 80% [S42].",  # attempt 2
+        ])
+        result = AdaptiveResearcher(cfg, llm, corpus_for(cfg)).run(QUESTION)
+
+        assert "CEO resigned" not in result.final_answer, "fabrication must not reach the user"
+        assert "S99" not in result.final_answer
+        assert result.confidence != "high", "a run that needed a fallback cannot be high confidence"
+        assert result.answer_audit is not None
+
+    def test_failed_answer_triggers_one_regeneration(self):
+        cfg = settings(max_rounds=1)
+        llm = FakeLLM(cfg, [
+            triage(),
+            GOOD_DRAFT,
+            verdict(Verdict.SUFFICIENT, NextAction.ANSWER),
+            "Revenue fell 80% [S42].",                                    # fails
+            "European revenue grew 34% year over year [S1].",             # corrected
+        ])
+        result = AdaptiveResearcher(cfg, llm, corpus_for(cfg)).run(QUESTION)
+
+        assert "34%" in result.final_answer
+        assert result.answer_audit.is_clean
+        assert any("failed verification" in w for w in result.warnings)
+
+    def test_clean_answer_passes_untouched(self):
+        cfg = settings(max_rounds=1)
+        honest = "European revenue grew 34% year over year to 2.1 billion euro [S1]."
+        llm = FakeLLM(cfg, [
+            triage(), GOOD_DRAFT, verdict(Verdict.SUFFICIENT, NextAction.ANSWER), honest,
+        ])
+        result = AdaptiveResearcher(cfg, llm, corpus_for(cfg)).run(QUESTION)
+
+        assert result.final_answer == honest
+        assert result.answer_audit.verified_rate == 1.0
+        assert result.confidence == "high"
+
+    def test_falls_back_to_deterministic_rendering(self):
+        """Two failed attempts must not ship unverifiable prose."""
+        cfg = settings(max_rounds=1)
+        llm = FakeLLM(cfg, [
+            triage(), GOOD_DRAFT, verdict(Verdict.SUFFICIENT, NextAction.ANSWER),
+            "Total nonsense about mergers [S77].",
+            "Different nonsense about layoffs [S88].",
+        ])
+        result = AdaptiveResearcher(cfg, llm, corpus_for(cfg)).run(QUESTION)
+
+        assert "verified against the sources" in result.final_answer
+        assert "European revenue grew 34%" in result.final_answer, "renders the verified claim"
+        assert "nonsense" not in result.final_answer
+        assert result.confidence != "high", "a degraded run must not report high confidence"
+
+
+class TestPerCitationVerification:
+    def test_irrelevant_citation_is_dropped(self):
+        from ragverify.grounding import check
+
+        ev = [
+            EvidenceItem(source_id="S1", label="a",
+                         text="European revenue grew 34% year over year.", origin=Route.LOCAL),
+            EvidenceItem(source_id="S2", label="b",
+                         text="The cafeteria menu changes on Fridays.", origin=Route.LOCAL),
+        ]
+        report = check([Claim(text="European revenue grew 34%", citations=["S1", "S2"])], ev)
+
+        assert len(report.supported) == 1
+        assert report.supported[0].citations == ["S1"], "S2 must not ride along on S1"
+        assert report.dropped_citations == ["S2"]
+
+    def test_bracket_form_survives_into_the_source_list(self):
+        from ragverify.grounding import check
+
+        ev = [EvidenceItem(source_id="S1", label="a",
+                           text="European revenue grew 34% year over year.", origin=Route.LOCAL)]
+        report = check([Claim(text="European revenue grew 34%", citations=["[S1]"])], ev)
+
+        assert report.supported[0].citations == ["S1"], "must be rewritten to the canonical id"
+        assert [c.source_id for c in AdaptiveResearcher._cited(ev, report)] == ["S1"]
+
+
+class TestBudgetIsEnforcedPerCall:
+    def test_max_calls_stops_mid_run(self):
+        """Checking only before an extra round left every call unmetered."""
+        cfg = settings(max_rounds=3)
+        tight = Budget(max_calls=1, max_cost_usd=10.0, max_seconds=600.0)
+        llm = FakeLLM(cfg, [
+            triage(), GOOD_DRAFT, verdict(Verdict.SUFFICIENT, NextAction.ANSWER), "Final.",
+        ], budget=tight)
+        result = AdaptiveResearcher(cfg, llm, corpus_for(cfg), budget=tight).run(QUESTION)
+
+        assert result.usage.calls <= 1, f"budget of 1 call allowed {result.usage.calls}"
+        assert not result.is_answer, "a budget-starved run must not claim to have answered"
+
+    def test_client_and_orchestrator_share_one_budget(self):
+        cfg = settings(max_rounds=1)
+        llm = FakeLLM(cfg, [
+            triage(), GOOD_DRAFT, verdict(Verdict.SUFFICIENT, NextAction.ANSWER), "Final.",
+        ])
+        researcher = AdaptiveResearcher(cfg, llm, corpus_for(cfg))
+        assert llm.budget is researcher.budget, "two counters means neither sees the whole run"
