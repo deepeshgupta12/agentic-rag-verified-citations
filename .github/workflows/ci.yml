@@ -48,22 +48,3 @@ jobs:
           python -c "import ast; ast.parse(open('app.py').read())"
           python -c "import ragverify; print('ragverify', ragverify.__version__)"
 
-  eval:
-    # Evals cost money, so they run only on demand and only when a key exists.
-    runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch'
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-      - run: pip install -e ".[dev]" tiktoken pypdf
-      - name: Run eval set
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: python evals/run_eval.py --out results.json
-      - uses: actions/upload-artifact@v4
-        with:
-          name: eval-results
-          path: results.json

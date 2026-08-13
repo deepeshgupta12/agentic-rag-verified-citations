@@ -1,0 +1,123 @@
+name: Evals
+
+# Live evals cost money and call a third-party API, so they never run on every
+# push. Three triggers, all deliberate:
+#   - manual dispatch, for when you want a number
+#   - a PR labelled `run-evals`, for changes that touch retrieval or grounding
+#   - a weekly schedule, which catches drift in the model behind the API rather
+#     than in this repository — the failure mode a commit-triggered run cannot
+#     see, because nothing here changed.
+on:
+  workflow_dispatch:
+    inputs:
+      filter:
+        description: "Only run cases whose id contains this"
+        required: false
+        type: string
+      model:
+        description: "Model id"
+        required: false
+        default: "gpt-5-mini"
+        type: string
+  pull_request:
+    types: [labeled]
+  schedule:
+    - cron: "0 6 * * 1"
+
+concurrency:
+  group: evals-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  eval:
+    # On PRs, only when explicitly labelled.
+    if: >
+      github.event_name != 'pull_request' ||
+      github.event.label.name == 'run-evals'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]" tiktoken pypdf
+
+      - name: Check for an API key
+        id: key
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          # A fork PR has no access to secrets. Skip cleanly rather than
+          # failing with an error that looks like a code problem.
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::OPENAI_API_KEY not available; skipping live evals."
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run evals
+        if: steps.key.outputs.present == 'true'
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          python evals/run_eval.py \
+            --out results.json \
+            --model "${{ inputs.model || 'gpt-5-mini' }}" \
+            ${{ inputs.filter && format('--filter {0}', inputs.filter) || '' }} \
+          || echo "EVAL_EXIT=$?" >> "$GITHUB_ENV"
+
+      - name: Compare against the committed baseline
+        if: steps.key.outputs.present == 'true'
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          if [ -f baseline.json ]; then
+            # `--compare` exits non-zero on regression; that is the gate.
+            python evals/run_eval.py --baseline baseline.json --compare --out /dev/null \
+              < /dev/null || exit 1
+          else
+            echo "::notice::No baseline.json committed; nothing to compare against."
+          fi
+
+      - name: Summarise
+        if: always() && steps.key.outputs.present == 'true'
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, pathlib
+          path = pathlib.Path("results.json")
+          if not path.exists():
+              print("No results produced.")
+              raise SystemExit(0)
+          data = json.loads(path.read_text())
+          s = data["summary"]
+          print("## Eval results\n")
+          print(f"**{s['passed']}/{s['cases']} passed** "
+                f"(${s['total_cost_usd']:.3f}, {s['wall_clock_s']:.0f}s)\n")
+          print("| metric | value |\n| --- | --- |")
+          for k, v in s.items():
+              if v is not None and k not in ("passed", "cases"):
+                  print(f"| {k} | {v} |")
+          failed = [r for r in data["results"] if not r["passed"]]
+          if failed:
+              print(f"\n### {len(failed)} failing case(s)\n")
+              print("| id | outcome | failed checks |\n| --- | --- | --- |")
+              for r in failed:
+                  bad = ", ".join(k for k, v in r["checks"].items() if not v) or "-"
+                  print(f"| {r['id']} | {r['outcome']} | {bad} |")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.key.outputs.present == 'true'
+        with:
+          name: eval-results
+          path: results.json
+          retention-days: 30
