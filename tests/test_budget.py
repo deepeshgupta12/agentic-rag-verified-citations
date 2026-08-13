@@ -186,5 +186,9 @@ class TestFetchPathGuards:
         assert not breaker.is_open("127.0.0.1"), "an SSRF block is not a transport failure"
 
     def test_budget_exposes_a_single_deadline(self):
+        # deadline is started_at + max_seconds exactly, so this is an equality
+        # check, not a range. Float subtraction returns 30.000000000000004,
+        # which a `<= 30` bound rejects for no real reason.
         budget = Budget(max_seconds=30.0)
-        assert 29 < budget.deadline - budget.started_at <= 30
+        assert budget.deadline - budget.started_at == pytest.approx(30.0)
+        assert budget.deadline > budget.started_at
