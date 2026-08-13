@@ -5,7 +5,7 @@
 [![CI](https://github.com/deepeshgupta12/agentic-rag-verified-citations/actions/workflows/ci.yml/badge.svg)](https://github.com/deepeshgupta12/agentic-rag-verified-citations/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-341%20passing-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-343%20passing-brightgreen)](tests/)
 
 *Agentic RAG · citation verification · NLI entailment · hallucination resistance · self-correcting retrieval · multi-hop*
 
@@ -104,6 +104,11 @@ result.plan           # per-sub-question coverage, if multi-hop ran
 
 Exit code `3` from the CLI means it abstained. Any OpenAI-compatible endpoint works via `OPENAI_BASE_URL`.
 
+> **`.env` is resolved from the current directory upward**, which is standard
+> dotenv behaviour. Running `ragverify` from outside the project will not see
+> the project's `.env` and will report no API key. Either run from the project
+> root, or `export OPENAI_API_KEY=...` in your shell.
+
 ---
 
 ## How it works
@@ -157,7 +162,17 @@ Every external call — LLM, embedding, search, fetch — is metered against one
 | `assess_source_quality` | `True` | Rank and warn on web evidence |
 | `cache_embeddings` | `True` | Content-hash cache — **146× faster** on a warm corpus |
 | `sanitize_sources` | `True` | Neutralise injections in retrieved text |
-| `max_cost_usd` / `max_seconds` / `max_calls` | 1.00 / 180 / 40 | Hard caps |
+| `max_cost_usd` / `max_seconds` / `max_calls` | 1.00 / 180 / 40 | Hard caps, per run |
+
+**Raise `max_seconds` when enabling the optional stages.** A single question
+with reranking and entailment takes roughly 110 seconds, so the 180-second
+default — calibrated before those existed — leaves no room for a second round.
+The loop then abstains where it would otherwise have escalated. 420 seconds is
+a realistic ceiling for the full pipeline.
+
+Budgets are per *run*, not per client. A client reused across many questions
+(a Streamlit session, a batch job, a server) gets a fresh budget for each
+one.
 | `telemetry` | `False` | OpenTelemetry spans |
 
 Optional extras: `pip install ragverify[rerank]` (cross-encoder), `ragverify[otel]` (tracing).
@@ -181,7 +196,7 @@ Live evals run on manual dispatch, on PRs labelled `run-evals`, and weekly. The 
 
 ```bash
 pip install -e ".[dev]"
-pytest                    # 341 tests, no API key, no network
+pytest                    # 343 tests, no API key, no network
 ```
 
 Tests run against a scripted fake LLM that *subclasses the real client*, so retries, usage accounting and the structured-output path are exercised rather than stubbed.
