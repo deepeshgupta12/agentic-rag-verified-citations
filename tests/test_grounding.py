@@ -273,3 +273,46 @@ class TestValueNormalization:
         assert audit.cited_sentences == 2
         assert audit.total_cited == 1
         assert audit.verified_rate == 1.0
+
+    @pytest.mark.parametrize(
+        "claim,source",
+        [
+            # Digits inside an identifier name a thing; they do not assert a
+            # quantity. Requiring the source to repeat a standard's own number
+            # rejects a claim for citing the document it came from. Every one
+            # of these was found by running against real public documents --
+            # no synthetic fixture contained an identifier with a digit.
+            ("PEP 8 says to add 4 spaces", "Add 4 spaces to distinguish arguments"),
+            ("The BM25 b parameter defaults to 0.75", "The parameter b is usually 0.75"),
+            ("IPv4 loopback is 127.0.0.0/8", "The loopback range is 127.0.0.0/8"),
+            ("GPT-4 was released in 2023", "The model was released in 2023"),
+            ("RFC 2616 defines the method", "The method is defined in the specification"),
+            ("Section 5 lists 12 examples", "Section 5 lists 12 examples"),
+            ("COVID-19 guidance was updated", "The guidance was updated"),
+        ],
+    )
+    def test_identifiers_are_not_quantities(self, claim, source):
+        from ragverify.normalize import unsupported_values
+
+        assert not unsupported_values(claim, source), f"{claim!r} should match {source!r}"
+
+    def test_hyphen_is_not_a_minus_sign(self):
+        """'GPT-4' parsed as negative four before this was fixed."""
+        from ragverify.normalize import canonical_values
+
+        assert "num:-4" not in canonical_values("GPT-4 is a model")
+
+    def test_letter_magnitude_must_be_adjacent(self):
+        """'BM25 b' read as 25 billion; a space-separated single letter is a
+        variable name, not a magnitude."""
+        from ragverify.normalize import canonical_values
+
+        assert "num:25000000000" not in canonical_values("The BM25 b parameter")
+        assert "num:2100000000" in canonical_values("revenue of 2.1B")
+
+    def test_bare_quarter_still_distinguishes(self):
+        """Masking Q3 as an identifier must not make Q3 and Q4 equivalent."""
+        from ragverify.normalize import unsupported_values
+
+        assert unsupported_values("Q3 revenue", "Q4 revenue")
+        assert not unsupported_values("Q3 revenue", "Q3 earnings")

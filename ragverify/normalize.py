@@ -66,19 +66,33 @@ _QUARTER_WORDS = re.compile(
     r"\b(" + "|".join(_ORDINALS) + r")\s+quarter\s*(?:of|,|in)?\s*(?:FY)?\s*(\d{4})\b", re.I
 )
 _FISCAL_YEAR = re.compile(r"\b(?:FY|fiscal\s+year|fiscal)\s*(\d{4})\b", re.I)
+# A quarter with no year. Masking it as an identifier avoids a spurious
+# "3", but discarding it entirely makes Q3 and Q4 indistinguishable, so it
+# gets its own year-less token.
+_BARE_QUARTER = re.compile(r"\bQ([1-4])\b(?!\s*(?:FY)?\s*\d{4})", re.I)
 _BARE_YEAR = re.compile(r"\b(19\d{2}|20\d{2})\b")
 
 _CURRENCY_ALT = "|".join(
     sorted((re.escape(s) for s in CURRENCY_SYMBOLS), key=len, reverse=True)
 )
-_MAGNITUDE_ALT = "|".join(sorted(MAGNITUDES, key=len, reverse=True))
+_MAGNITUDE_WORDS = "|".join(
+    sorted((m for m in MAGNITUDES if len(m) > 2), key=len, reverse=True)
+)
+_MAGNITUDE_LETTERS = "|".join(
+    sorted((m for m in MAGNITUDES if len(m) <= 2), key=len, reverse=True)
+)
 
 # A quantity: optional leading currency, a number, optional magnitude word,
 # optional trailing currency/percent. Ordered so longer tokens win.
 _QUANTITY = re.compile(
     rf"(?P<pre>{_CURRENCY_ALT})?\s*"
-    rf"(?P<num>-?\d{{1,3}}(?:,\d{{3}})+(?:\.\d+)?|-?\d+(?:\.\d+)?)"
-    rf"\s*(?P<mag>{_MAGNITUDE_ALT})?"
+    # (?<![\w-]) so a hyphen after a word is not a minus sign: "GPT-4" is an
+    # identifier, not negative four, and "cost-5" is not -5.
+    rf"(?P<num>(?<![\w-])-?\d{{1,3}}(?:,\d{{3}})+(?:\.\d+)?|(?<![\w-])-?\d+(?:\.\d+)?)"
+    # Spelled-out magnitudes may be separated ("2.1 billion"); single letters
+    # must be attached ("2.1B"), because "25 b" is a number beside a variable
+    # named b, not twenty-five billion.
+    rf"(?:\s*(?P<mag>{_MAGNITUDE_WORDS})|(?P<magl>{_MAGNITUDE_LETTERS}))?"
     rf"\s*(?P<post>%|percent|per\s+cent|{_CURRENCY_ALT})?",
     re.I,
 )
@@ -86,6 +100,33 @@ _QUANTITY = re.compile(
 # Percent must be distinguishable from a bare count: "34%" and "34 staff" are
 # different facts and previously collided.
 _PCT_SUFFIX = re.compile(r"^(%|percent|per\s+cent)$", re.I)
+
+
+# Identifiers that merely CONTAIN digits: PEP 8, BM25, IPv4, GPT-4, RFC 2616,
+# ISO 9001, Q3, H1, COVID-19, Section 5. The digits name a thing rather than
+# assert a quantity, so requiring the source to contain them rejects a claim
+# for citing the document it came from. Found by running against real
+# documents; no synthetic fixture contained an identifier with a digit in it.
+_IDENTIFIER = re.compile(
+    r"\b(?:"
+    r"[A-Za-z]{2,}[-\u2011]?\d+(?:\.\d+)*"          # BM25, GPT-4, IPv4, COVID-19
+    r"|(?:PEP|RFC|ISO|IEEE|ANSI|BS|EN|DIN|NIST|CVE|SP)\s+\d+(?:[-.]\d+)*"
+    r"|(?:section|chapter|figure|table|appendix|part|clause|article|item|step)"
+    r"\s+\d+(?:\.\d+)*"
+    r"|[QH]\d\b"                                     # Q3, H1
+    r")",
+    re.I,
+)
+
+
+def _mask_identifiers(text: str) -> str:
+    """Blank out identifiers whose digits are part of a name.
+
+    "PEP 8 recommends 4 spaces" asserts one quantity, not two. Treating the 8
+    as a claim means a correct statement is rejected unless the cited passage
+    happens to repeat the standard's own number.
+    """
+    return _IDENTIFIER.sub(" ", text)
 
 
 def _mask_dates(text: str) -> str:
@@ -131,12 +172,15 @@ def quantity_groups(text: str) -> list[set[str]]:
     """
     groups: list[set[str]] = []
 
-    for match in _QUANTITY.finditer(_mask_dates(text)):
+    # Dates first: 'Q3 2024' must be consumed whole by the quarter pattern.
+    # Masking identifiers first strips the 'Q3', leaving a bare 2024 that
+    # then reads as a quantity rather than part of the date.
+    for match in _QUANTITY.finditer(_mask_identifiers(_mask_dates(text))):
         number = _to_number(match.group("num"))
         if number is None:
             continue
 
-        magnitude = (match.group("mag") or "").lower()
+        magnitude = (match.group("mag") or match.group("magl") or "").lower()
         pre = (match.group("pre") or "").lower().strip()
         post = (match.group("post") or "").lower().strip()
 
@@ -218,6 +262,9 @@ def canonical_dates(text: str) -> set[str]:
     for year in _FISCAL_YEAR.findall(text):
         out.add(f"fy:{year}")
         out.add(f"year:{year}")
+
+    for quarter in _BARE_QUARTER.findall(text):
+        out.add(f"quarter:Q{quarter}")
 
     out.update(f"year:{y}" for y in _BARE_YEAR.findall(text))
     return out

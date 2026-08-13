@@ -345,9 +345,17 @@ class TestBudgetIsEnforcedPerCall:
         assert not result.is_answer, "a budget-starved run must not claim to have answered"
 
     def test_client_and_orchestrator_share_one_budget(self):
+        """Bound at run time, not construction.
+
+        Binding in __init__ let a reused client keep the first question's
+        already-spent budget, so later questions started with an exhausted
+        clock. The client must track the budget of the run in progress.
+        """
         cfg = settings(max_rounds=1)
         llm = FakeLLM(cfg, [
             triage(), GOOD_DRAFT, verdict(Verdict.SUFFICIENT, NextAction.ANSWER), CITED_ANSWER,
         ])
         researcher = AdaptiveResearcher(cfg, llm, corpus_for(cfg))
+        researcher.run(QUESTION)
+
         assert llm.budget is researcher.budget, "two counters means neither sees the whole run"

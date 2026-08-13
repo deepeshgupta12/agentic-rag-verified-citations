@@ -192,3 +192,68 @@ class TestFetchPathGuards:
         budget = Budget(max_seconds=30.0)
         assert budget.deadline - budget.started_at == pytest.approx(30.0)
         assert budget.deadline > budget.started_at
+
+
+class TestBudgetIsPerRun:
+    """A client is reused across questions; a budget is not.
+
+    Binding the budget once at construction let the first question's spend
+    follow the client into every later one. Observed on a 12-question run:
+    questions 3 onward each got 0.1s and abstained instantly, having
+    inherited an already-exhausted clock.
+    """
+
+    def _researcher(self, client, cfg):
+        import sys
+
+        sys.path.insert(0, "tests")
+        from test_orchestrator import corpus_for
+
+        from ragverify.orchestrator import AdaptiveResearcher
+
+        return AdaptiveResearcher(cfg, client, corpus_for(cfg))
+
+    def _script(self, cfg):
+        import sys
+
+        sys.path.insert(0, "tests")
+        from test_orchestrator import CITED_ANSWER, GOOD_DRAFT, FakeLLM, triage, verdict
+
+        from ragverify.schemas import NextAction, Verdict
+
+        return FakeLLM(cfg, [
+            triage(), GOOD_DRAFT, verdict(Verdict.SUFFICIENT, NextAction.ANSWER), CITED_ANSWER,
+        ] * 4)
+
+    def test_second_question_gets_a_fresh_budget(self):
+        import sys
+
+        sys.path.insert(0, "tests")
+        from test_orchestrator import QUESTION, settings
+
+        cfg = settings(max_rounds=1, max_calls=6)
+        client = self._script(cfg)
+
+        first = self._researcher(client, cfg).run(QUESTION)
+        second = self._researcher(client, cfg).run(QUESTION)
+
+        assert first.is_answer, "first question must answer"
+        assert second.is_answer, "second must not inherit the first's spent budget"
+        assert second.usage.calls <= 4, "usage must be per-run, not cumulative"
+
+    def test_client_budget_is_rebound_each_run(self):
+        import sys
+
+        sys.path.insert(0, "tests")
+        from test_orchestrator import QUESTION, settings
+
+        cfg = settings(max_rounds=1)
+        client = self._script(cfg)
+
+        r1 = self._researcher(client, cfg)
+        r1.run(QUESTION)
+        r2 = self._researcher(client, cfg)
+        r2.run(QUESTION)
+
+        assert client.budget is r2.budget, "the client must track the current run's budget"
+        assert client.budget is not r1.budget

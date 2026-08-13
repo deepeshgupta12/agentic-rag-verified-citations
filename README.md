@@ -5,7 +5,7 @@
 [![CI](https://github.com/deepeshgupta12/agentic-rag-verified-citations/actions/workflows/ci.yml/badge.svg)](https://github.com/deepeshgupta12/agentic-rag-verified-citations/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-334%20passing-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-341%20passing-brightgreen)](tests/)
 
 *Agentic RAG · citation verification · NLI entailment · hallucination resistance · self-correcting retrieval · multi-hop*
 
@@ -181,7 +181,7 @@ Live evals run on manual dispatch, on PRs labelled `run-evals`, and weekly. The 
 
 ```bash
 pip install -e ".[dev]"
-pytest                    # 334 tests, no API key, no network
+pytest                    # 341 tests, no API key, no network
 ```
 
 Tests run against a scripted fake LLM that *subclasses the real client*, so retries, usage accounting and the structured-output path are exercised rather than stubbed.
@@ -212,6 +212,10 @@ ragverify/
 ├── agents.py         role prompts and evidence formatting
 ├── config.py         settings, .env loading, model pricing
 ├── websearch.py      failover, SSRF-guarded fetch, extraction
+├── ingest.py         loading, cleaning, token-aware chunking
+├── tokens.py         token counting with a character-ratio fallback
+├── trace.py          in-process event stream for the UI
+├── ag2_team.py       optional AG2 GroupChat adversarial review
 └── cli.py
 ```
 

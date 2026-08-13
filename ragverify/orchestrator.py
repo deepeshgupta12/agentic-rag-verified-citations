@@ -59,6 +59,7 @@ from .schemas import (
     RoundRecord,
     Route,
     TriageDecision,
+    Usage,
     Verdict,
     VerifierReport,
     WebResult,
@@ -234,16 +235,26 @@ class AdaptiveResearcher:
         # Append-only audit trail. Built during the run so it captures each
         # passage as it was actually used, including the pre-sanitisation body.
         self.ledger: EvidenceLedger | None = None
-        # One budget object, shared. Without this the client meters its own
-        # calls while the loop meters a different counter, and neither sees
-        # the whole run.
-        if client.budget is None:
-            client.budget = self.budget
 
     # ------------------------------------------------------------------
 
     def run(self, question: str) -> ResearchResult:
         """Public entry point: wraps the loop in a span when tracing is on."""
+        # Claim the client's budget for the duration of THIS run, and restart
+        # the clock. A researcher is one question; a client is usually reused
+        # across many (a Streamlit session, a batch eval, a server). Binding
+        # the budget once at construction let the first question's spent
+        # budget follow the client into every later one -- observed on a
+        # 12-question run where questions 3 onward each got 0.1s and abstained
+        # instantly, having inherited an already-exhausted clock.
+        self.budget.started_at = time.monotonic()
+        self.budget.calls = 0
+        self.budget.cost_usd = 0.0
+        self.client.budget = self.budget
+        # Usage is per-run too, or cost accounting reports the session total
+        # as though one question had spent it.
+        self.client.usage = Usage()
+
         if self.settings.telemetry and not telemetry.enabled():
             telemetry.configure(endpoint=self.settings.otlp_endpoint)
 
