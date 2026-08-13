@@ -105,6 +105,20 @@ class Settings:
     max_cost_usd: float = 1.00
     max_calls: int = 40
 
+    # --- reranking -------------------------------------------------------
+    # BM25 and embeddings score a passage in isolation; neither reads it as an
+    # answer to the question. Reranking judges relevance to THIS question after
+    # retrieval narrows the field. Order matters because the evidence budget
+    # truncates: a passage below the token limit never reaches the model, and
+    # no downstream verification can recover what was never shown.
+    #   "none" | "cross-encoder" (local, needs sentence-transformers) | "llm"
+    rerank_method: str = "none"
+    rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    # Overfetch multiplier before reranking: the reranker needs candidates to
+    # reorder, so retrieval pulls more than top_k when reranking is on.
+    rerank_candidates: int = 4
+    rerank_drop_below: float | None = None
+
     # --- source quality --------------------------------------------------
     # Rank and warn on web evidence. Grounding certifies whatever a page said,
     # so a claim correctly grounded in a bad source passes every check here

@@ -38,6 +38,7 @@ from . import agents, sanitize, sourcequality, websearch
 from . import coverage as coverage_mod
 from . import entailment as entailment_mod
 from . import grounding as grounding_mod
+from . import rerank as rerank_mod
 from .budget import Budget, BudgetExceeded, CircuitBreaker
 from .config import Settings
 from .ingest import Document, build_index, corpus_summary, top_terms
@@ -104,7 +105,20 @@ class Corpus:
                 if tracer:
                     tracer.emit(EventKind.WARNING, self.warnings[-1])
 
-        self.retriever = HybridRetriever(self.chunks, dense=dense, embed_query=embed_query)
+        reranker = None
+        if settings.rerank_method != "none":
+            def reranker(question, candidates, top_k):
+                return rerank_mod.rerank(
+                    question, candidates, top_k,
+                    method=settings.rerank_method,
+                    client=client,
+                    drop_below=settings.rerank_drop_below,
+                    model_name=settings.rerank_model,
+                )
+
+        self.retriever = HybridRetriever(
+            self.chunks, dense=dense, embed_query=embed_query, reranker=reranker
+        )
 
     def __len__(self) -> int:
         return len(self.chunks)

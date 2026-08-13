@@ -232,11 +232,17 @@ class HybridRetriever:
         chunks: Sequence[Chunk],
         dense: DenseIndex | None = None,
         embed_query=None,
+        reranker=None,
     ) -> None:
         self.chunks = list(chunks)
         self.bm25 = BM25Index(self.chunks)
         self.dense = dense
         self._embed_query = embed_query
+        # Callable (question, candidates, top_k) -> (passages, method_used).
+        # Injected rather than imported so retrieval stays free of any model
+        # dependency and remains testable without one.
+        self._reranker = reranker
+        self.last_rerank_method = "none"
         self.warnings: list[str] = []
 
     @property
@@ -291,5 +297,19 @@ class HybridRetriever:
         ]
         scored.sort(key=lambda s: -s.score)
 
-        head = scored[: max(top_k * 3, top_k)]
+        # With a reranker, hand it a deeper candidate list: it can only
+        # reorder what it is given, and the point is to rescue passages
+        # retrieval ranked too low.
+        depth = max(top_k * 4, 20) if self._reranker else max(top_k * 3, top_k)
+        head = scored[:depth]
+
+        if self._reranker:
+            reranked, method = self._reranker(query, head, top_k)
+            self.last_rerank_method = method
+            if reranked:
+                # MMR still applies: reranking judges relevance, not
+                # redundancy, and three near-identical top hits waste the
+                # evidence budget however relevant each one is.
+                return mmr_rerank(reranked, top_k) if diversify else reranked[:top_k]
+
         return mmr_rerank(head, top_k) if diversify else head[:top_k]

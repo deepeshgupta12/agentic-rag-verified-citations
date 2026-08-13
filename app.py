@@ -90,6 +90,12 @@ with st.sidebar:
     st.markdown("**Retrieval**")
     top_k = st.slider("Passages per round", 3, 20, 6)
     use_embeddings = st.toggle("Hybrid (BM25 + embeddings)", value=True)
+    rerank_method = st.selectbox(
+        "Rerank passages", ["none", "llm", "cross-encoder"], index=0,
+        help="Retrieval scores each passage in isolation. Reranking judges it as an "
+             "answer to your question. Order matters because the evidence budget "
+             "truncates — a passage below the limit never reaches the model.",
+    )
     web_enabled = st.toggle("Web search", value=True)
 
     st.divider()
@@ -113,6 +119,7 @@ settings = Settings.from_env(
     abstain_below_support=abstain_below,
     max_cost_usd=float(max_cost),
     use_entailment=use_entailment,
+    rerank_method=rerank_method,
 )
 
 # ---------------------------------------------------------------------------

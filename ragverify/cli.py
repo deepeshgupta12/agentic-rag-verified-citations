@@ -73,6 +73,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-embeddings", action="store_true", help="BM25 only, no embedding spend")
     parser.add_argument("--no-sanitize", action="store_true", help="skip prompt-injection neutralization")
     parser.add_argument(
+        "--rerank", choices=["none", "cross-encoder", "llm"], default=None,
+        help="rerank retrieved passages against the question "
+             "(cross-encoder is local and needs sentence-transformers)",
+    )
+    parser.add_argument(
         "--entailment", action="store_true",
         help="semantic entailment check on verified claims (catches 'most' cited as 'all'); "
              "costs one extra call per round",
@@ -96,6 +101,8 @@ def main(argv: list[str] | None = None) -> int:
         overrides["sanitize_sources"] = False
     if args.entailment:
         overrides["use_entailment"] = True
+    if args.rerank:
+        overrides["rerank_method"] = args.rerank
     if args.always_answer:
         overrides["abstain_below_support"] = 0.0
     if args.max_cost:
