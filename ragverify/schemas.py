@@ -330,6 +330,8 @@ class ResearchResult(BaseModel):
     # modifications. Text is excluded here so the result stays shareable;
     # the full ledger with bodies is on the researcher.
     ledger: dict[str, Any] = Field(default_factory=dict)
+    # Publisher class, recency and cross-domain corroboration for web sources.
+    source_quality: dict[str, Any] = Field(default_factory=dict)
     budget: dict[str, float] = Field(default_factory=dict)
     elapsed_s: float = 0.0
 

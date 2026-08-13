@@ -105,6 +105,16 @@ class Settings:
     max_cost_usd: float = 1.00
     max_calls: int = 40
 
+    # --- source quality --------------------------------------------------
+    # Rank and warn on web evidence. Grounding certifies whatever a page said,
+    # so a claim correctly grounded in a bad source passes every check here
+    # and is still wrong. Quality only reorders and warns -- never discards,
+    # because a weak source that is the only one answering the question is
+    # still the answer.
+    assess_source_quality: bool = True
+    min_source_authority: float = 0.3
+    min_distinct_domains: int = 2
+
     # --- entailment ------------------------------------------------------
     # Second-stage semantic check over claims that already passed lexical
     # grounding. Catches what a bag of words structurally cannot: "most" cited

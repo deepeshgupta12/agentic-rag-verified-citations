@@ -34,7 +34,7 @@ import logging
 import time
 from collections.abc import Callable, Sequence
 
-from . import agents, sanitize, websearch
+from . import agents, sanitize, sourcequality, websearch
 from . import coverage as coverage_mod
 from . import entailment as entailment_mod
 from . import grounding as grounding_mod
@@ -184,6 +184,8 @@ class AdaptiveResearcher:
         # rendering. The content is verified, but generation proved
         # unreliable, and confidence should say so.
         self.synthesis_degraded = False
+        # Latest web source-quality assessment, surfaced on the result.
+        self.quality: sourcequality.QualityReport | None = None
         # Append-only audit trail. Built during the run so it captures each
         # passage as it was actually used, including the pre-sanitisation body.
         self.ledger: EvidenceLedger | None = None
@@ -276,6 +278,21 @@ class AdaptiveResearcher:
                     self._warn(note, index)
                     for det in detections:
                         flags_by_id.setdefault(det.source_id, []).append(det.kind)
+
+            # Rank web evidence by publisher class, recency and cross-domain
+            # corroboration before it reaches the drafting prompt, so the
+            # strongest sources are the ones that fit the token budget.
+            if settings.assess_source_quality:
+                quality = sourcequality.assess(
+                    evidence, question,
+                    min_authority=settings.min_source_authority,
+                    min_domains=settings.min_distinct_domains,
+                )
+                if quality.assessments:
+                    evidence = sourcequality.rank(evidence, quality)
+                    self.quality = quality
+                    for note in quality.warnings:
+                        self._warn(note, index)
 
             for item in evidence:
                 self.ledger.record_evidence(
@@ -407,6 +424,25 @@ class AdaptiveResearcher:
             injections_detected=sorted(set(self.injections)),
             answer_audit=audit,
             ledger=self.ledger.to_dict(include_text=False),
+            source_quality=(
+                {
+                    "mean_authority": self.quality.mean_authority,
+                    "distinct_domains": self.quality.distinct_domains,
+                    "diversity": self.quality.diversity,
+                    "time_sensitive": self.quality.time_sensitive,
+                    "sources": [
+                        {
+                            "source_id": a.source_id, "domain": a.domain,
+                            "authority": a.authority, "freshness": a.freshness,
+                            "published_year": a.published_year,
+                            "corroborated_by": a.corroborated_by, "score": a.score,
+                        }
+                        for a in self.quality.assessments
+                    ],
+                }
+                if self.quality
+                else {}
+            ),
             budget=self.budget.snapshot(),
             elapsed_s=round(time.time() - started, 2),
         )
