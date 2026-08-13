@@ -38,6 +38,7 @@ from . import agents, sanitize, sourcequality, websearch
 from . import coverage as coverage_mod
 from . import entailment as entailment_mod
 from . import grounding as grounding_mod
+from . import planner as planner_mod
 from . import rerank as rerank_mod
 from .budget import Budget, BudgetExceeded, CircuitBreaker
 from .config import Settings
@@ -200,6 +201,9 @@ class AdaptiveResearcher:
         self.synthesis_degraded = False
         # Latest web source-quality assessment, surfaced on the result.
         self.quality: sourcequality.QualityReport | None = None
+        # Evidence gathered by multi-hop, merged into the main loop so the
+        # answer is written over everything the hops found.
+        self._hop_evidence: list[EvidenceItem] = []
         # Append-only audit trail. Built during the run so it captures each
         # passage as it was actually used, including the pre-sanitisation body.
         self.ledger: EvidenceLedger | None = None
@@ -234,6 +238,11 @@ class AdaptiveResearcher:
             + (f", missing: {', '.join(cov.missing_terms[:4])}" if cov.missing_terms else ""),
             data={"coverage": cov.score, "suggested": suggested.value, "reason": reason},
         )
+
+        # Multi-hop planning runs before triage: chained hops gather evidence
+        # the single-shot loop could not have queried for, and the loop then
+        # reasons over it.
+        plan_report = self._plan_and_execute(question)
 
         triage = self._triage(question, cov, suggested, reason)
 
@@ -438,6 +447,7 @@ class AdaptiveResearcher:
             injections_detected=sorted(set(self.injections)),
             answer_audit=audit,
             ledger=self.ledger.to_dict(include_text=False),
+            plan=plan_report.model_dump(mode="json") if plan_report.planned else {},
             source_quality=(
                 {
                     "mean_authority": self.quality.mean_authority,
@@ -558,6 +568,114 @@ class AdaptiveResearcher:
     # Steps
     # ------------------------------------------------------------------
 
+    def _plan_and_execute(self, question: str) -> planner_mod.PlanReport:
+        """Decompose into a sub-question DAG and run the hops in order.
+
+        Each hop retrieves, drafts and grounds independently, and its findings
+        are substituted into dependent hops' queries. Coverage is recorded per
+        sub-question: an aggregate would hide a decisive hop left unanswered
+        while the others carry the mean.
+        """
+        report = planner_mod.PlanReport()
+        if not self.settings.use_multi_hop or not self.corpus:
+            return report
+
+        raw = planner_mod.plan_research(question, self.corpus.summary, self.client)
+        plan, warnings = planner_mod.validate_plan(raw)
+        for note in warnings:
+            self._warn(f"Plan: {note}")
+        report.rationale = plan.rationale
+        report.warnings = warnings
+
+        if not plan.multi_hop:
+            self.tracer.emit(
+                EventKind.TRIAGE,
+                f"Single-hop question — {plan.rationale or 'no chained retrieval needed'}",
+            )
+            return report
+
+        report.planned = True
+        report.multi_hop = True
+        self.tracer.emit(
+            EventKind.TRIAGE,
+            f"Multi-hop plan: {len(plan.sub_questions)} sub-question(s) — {plan.rationale}",
+            data={"sub_questions": [sq.text for sq in plan.sub_questions]},
+        )
+
+        findings: dict[int, list] = {}
+        total = len(plan.sub_questions)
+        for hop_index, sub in enumerate(plan.sub_questions[: self.settings.max_hops], start=1):
+            self._sync_budget()
+            if not self.budget.can_afford_round(estimated_calls=2, estimated_seconds=15.0):
+                self._warn(f"Stopped multi-hop after {hop_index - 1} hop(s): budget exhausted.")
+                break
+
+            query = planner_mod.resolve_query(sub, findings)
+            self.tracer.emit(
+                EventKind.RETRIEVE,
+                f"Hop {hop_index}/{total}: {query[:110]}"
+                + (f"  (depends on {sub.depends_on})" if sub.depends_on else ""),
+                data={"sub_question_id": sub.id},
+            )
+
+            scored = self.corpus.retriever.search(query, self.settings.top_k)
+            evidence = _to_evidence(scored, prefix=f"H{sub.id}x")
+            if self.settings.sanitize_sources and evidence:
+                evidence, detections = sanitize.sanitize_evidence(evidence)
+                if detections:
+                    self.injections.extend(sorted({d.kind for d in detections}))
+
+            hop = planner_mod.HopResult(
+                sub_question_id=sub.id,
+                question=sub.text,
+                query_used=query,
+                evidence_ids=[e.source_id for e in evidence],
+            )
+
+            if not evidence:
+                hop.note = "no evidence retrieved"
+                report.hops.append(hop)
+                continue
+
+            try:
+                draft = self.client.structured(
+                    agents.RESEARCH_SYSTEM,
+                    agents.research_prompt(sub.text, evidence, self.settings.evidence_token_budget),
+                    ResearchDraft,
+                )
+            except (LLMError, SchemaError, BudgetExceeded) as exc:
+                hop.note = f"research failed: {exc}"
+                report.hops.append(hop)
+                continue
+
+            grounded = grounding_mod.check(draft.claims, evidence)
+            hop.findings = grounded.supported
+            hop.coverage = planner_mod.hop_coverage(grounded.supported, evidence)
+            hop.answered = bool(grounded.supported)
+            if not hop.answered:
+                hop.note = "nothing grounded"
+
+            findings[sub.id] = grounded.supported
+            self._hop_evidence.extend(evidence)
+            if self.ledger is not None:
+                for item in evidence:
+                    self.ledger.record_evidence(item)
+
+            self.tracer.emit(
+                EventKind.GROUND,
+                f"Hop {hop_index}: {'answered' if hop.answered else 'UNANSWERED'} "
+                f"({len(grounded.supported)} grounded claim(s), coverage {hop.coverage:.0%})",
+                data={"sub_question_id": sub.id},
+            )
+            report.hops.append(hop)
+
+        if report.unanswered:
+            self._warn(
+                f"{len(report.unanswered)} sub-question(s) unanswered: "
+                + "; ".join(q[:70] for q in report.unanswered)
+            )
+        return report
+
     def _triage(
         self,
         question: str,
@@ -647,6 +765,12 @@ class AdaptiveResearcher:
         if route in (Route.LOCAL, Route.HYBRID) and self.corpus and len(self.corpus):
             scored = self.corpus.retriever.search(query, top_k, expansions=expansions)
             evidence.extend(_to_evidence(scored))
+
+        # Hop evidence leads: it answers sub-questions the top-level query
+        # could not express, so dropping it would waste the hops entirely.
+        if round_index == 1 and self._hop_evidence:
+            seen = {e.source_id for e in evidence}
+            evidence = [e for e in self._hop_evidence if e.source_id not in seen] + evidence
 
         if route in (Route.WEB, Route.HYBRID) and self._web_available():
             # Reuse pages already fetched in an earlier round rather than

@@ -90,6 +90,12 @@ with st.sidebar:
     st.markdown("**Retrieval**")
     top_k = st.slider("Passages per round", 3, 20, 6)
     use_embeddings = st.toggle("Hybrid (BM25 + embeddings)", value=True)
+    multi_hop = st.toggle(
+        "Multi-hop planning", value=False,
+        help="For questions where one sub-question's query cannot be written until "
+             "another is answered — 'what did the person who signed X previously run?'. "
+             "Most questions are single-hop and the planner will say so.",
+    )
     rerank_method = st.selectbox(
         "Rerank passages", ["none", "llm", "cross-encoder"], index=0,
         help="Retrieval scores each passage in isolation. Reranking judges it as an "
@@ -120,6 +126,7 @@ settings = Settings.from_env(
     max_cost_usd=float(max_cost),
     use_entailment=use_entailment,
     rerank_method=rerank_method,
+    use_multi_hop=multi_hop,
 )
 
 # ---------------------------------------------------------------------------
@@ -251,6 +258,15 @@ for result in reversed(st.session_state.history):
                 st.markdown(f"- {gap}")
 
     with st.expander(f"Adaptive trace — {len(result.rounds)} round(s)"):
+        if result.plan.get("hops"):
+            st.markdown(f"**Multi-hop plan** — {result.plan.get('rationale', '')}")
+            for hop in result.plan["hops"]:
+                mark = "✅" if hop["answered"] else "❌"
+                st.markdown(
+                    f"{mark} hop {hop['sub_question_id']}: {hop['question']} "
+                    f"· coverage {hop['coverage']:.0%}"
+                    + (f" · _{hop['note']}_" if hop.get("note") else "")
+                )
         if result.triage:
             coverage = result.triage.measured_coverage
             st.markdown(

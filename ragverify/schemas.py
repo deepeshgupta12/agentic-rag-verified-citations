@@ -332,6 +332,10 @@ class ResearchResult(BaseModel):
     ledger: dict[str, Any] = Field(default_factory=dict)
     # Publisher class, recency and cross-domain corroboration for web sources.
     source_quality: dict[str, Any] = Field(default_factory=dict)
+    # Multi-hop plan with coverage recorded per sub-question. Empty when the
+    # question was single-hop. Per-hop rather than aggregate: one mean hides
+    # the case where the decisive sub-question is the unanswered one.
+    plan: dict[str, Any] = Field(default_factory=dict)
     budget: dict[str, float] = Field(default_factory=dict)
     elapsed_s: float = 0.0
 

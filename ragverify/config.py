@@ -105,6 +105,15 @@ class Settings:
     max_cost_usd: float = 1.00
     max_calls: int = 40
 
+    # --- multi-hop -------------------------------------------------------
+    # Sequential retrieval for questions where one sub-question's QUERY cannot
+    # be written until another is answered ("which offices grew fastest" needs
+    # the office list first). Distinct from parallel sub-query widening, which
+    # the loop already does. Off by default: most questions are single-hop and
+    # planning them costs calls for nothing.
+    use_multi_hop: bool = False
+    max_hops: int = 4
+
     # --- reranking -------------------------------------------------------
     # BM25 and embeddings score a passage in isolation; neither reads it as an
     # answer to the question. Reranking judges relevance to THIS question after
