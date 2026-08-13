@@ -41,6 +41,8 @@ _WS = re.compile(r"\s+")
 _BOILERPLATE = re.compile(
     r"^(cookie|accept all|subscribe|sign in|log in|menu|skip to|share this|advertisement)\b", re.I
 )
+# Short lines worth keeping: addresses, versions, quantities, ranges, dates.
+_DATA_BEARING = re.compile(r"\d")
 
 
 class SearchUnavailable(RuntimeError):
@@ -318,10 +320,46 @@ def fetch_page(
         return ""
 
 
+# Rendered mathematics carries the constants that matter -- "k1 is usually
+# chosen in [1.2, 2.0]" is entirely inside the formula markup. Stripping tags
+# blindly deletes them and leaves a sentence that trails off exactly where its
+# value should be, so the page looks readable and has silently lost the fact.
+# Found by asking for BM25's default parameters and getting a correct
+# "the excerpts do not state this" from a page that visibly does.
+_MATH_ANNOTATION = re.compile(
+    r"<annotation[^>]*>(.*?)</annotation>", re.DOTALL | re.I
+)
+_MATH_ALT = re.compile(r'<(?:img|math)[^>]*\salt(?:text)?="([^"]{1,300})"', re.I)
+_MATH_BLOCK = re.compile(r"<math[^>]*>.*?</math>", re.DOTALL | re.I)
+
+
+def _recover_math(markup: str) -> str:
+    """Replace math elements with their LaTeX/alt text before tags are stripped.
+
+    MathML carries a TeX ``<annotation>`` and Wikipedia's fallback images carry
+    ``alt``. Either is a usable textual rendering; without one the formula
+    becomes whitespace.
+    """
+    def replace(match: re.Match) -> str:
+        block = match.group(0)
+        annotation = _MATH_ANNOTATION.search(block)
+        if annotation:
+            return f" {html.unescape(annotation.group(1))} "
+        alt = _MATH_ALT.search(block)
+        return f" {html.unescape(alt.group(1))} " if alt else " "
+
+    return _MATH_BLOCK.sub(replace, markup)
+
+
 def _extract_text(markup: str) -> str:
+    markup = _recover_math(markup)
     body = _SCRIPT_STYLE.sub(" ", markup)
     # Preserve block boundaries as paragraph breaks so the chunker still has
     # structure to split on after tags are gone.
+    # Cells are joined within a row before rows are split. Without a cell
+    # separator the columns run together; without keeping the row intact the
+    # address loses its description and vice versa.
+    body = re.sub(r"</(td|th)>", " | ", body, flags=re.I)
     body = re.sub(r"</(p|div|section|article|li|h[1-6]|tr)>", "\n\n", body, flags=re.I)
     body = re.sub(r"<br\s*/?>", "\n", body, flags=re.I)
     text = html.unescape(_TAGS.sub(" ", body))
@@ -329,8 +367,15 @@ def _extract_text(markup: str) -> str:
     lines = []
     for line in text.split("\n"):
         line = _WS.sub(" ", line).strip()
-        # Single words and nav labels are almost always chrome, not content.
-        if len(line) > 40 and not _BOILERPLATE.match(line):
+        if _BOILERPLATE.match(line):
+            continue
+        # Length alone is the wrong test for whether a line is content. Table
+        # cells carrying the actual data are short -- "10.0.0.0/8" is ten
+        # characters -- so a length filter keeps the prose column and silently
+        # discards the column with the facts in it. The page still reads
+        # coherently and has lost exactly what was being asked for. Short
+        # lines are kept when they carry data.
+        if len(line) > 40 or (len(line) > 3 and _DATA_BEARING.search(line)):
             lines.append(line)
     return "\n\n".join(lines)
 

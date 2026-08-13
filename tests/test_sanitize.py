@@ -173,3 +173,88 @@ class TestSSRF:
 
         # Blocked before any socket is opened; a dead fetch is not a crash.
         assert fetch_page("http://169.254.169.254/latest/meta-data/", Settings()) == ""
+
+
+class TestMathRecovery:
+    """Rendered mathematics carries the constants that matter.
+
+    Stripping tags blindly deletes the formula and leaves a sentence trailing
+    off exactly where its value belongs — the page still reads fine and has
+    silently lost the fact. Found by asking for BM25's default parameters and
+    getting a correct "the excerpts do not state this" from a page that
+    visibly does.
+    """
+
+    def test_mathml_annotation_is_recovered(self):
+        from ragverify.websearch import _extract_text
+
+        out = _extract_text(
+            "<p>and <math><annotation encoding='application/x-tex'>b = 0.75</annotation>"
+            "</math> are free parameters, usually chosen as <math><annotation "
+            "encoding='application/x-tex'>k_1 in [1.2, 2.0]</annotation></math> "
+            "absent an advanced optimization of these values.</p>"
+        )
+        assert "0.75" in out
+        assert "1.2" in out and "2.0" in out
+
+    def test_alt_text_used_when_no_annotation(self):
+        from ragverify.websearch import _extract_text
+
+        out = _extract_text(
+            '<p>The threshold is <math alt="x >= 0.85">…</math> for all documents '
+            'in the collection, which is a sentence long enough to survive.</p>'
+        )
+        assert "0.85" in out
+
+    def test_math_without_text_does_not_break_extraction(self):
+        from ragverify.websearch import _extract_text
+
+        out = _extract_text(
+            "<p>The formula <math><mi>x</mi></math> is shown above in the section "
+            "covering scoring, which is long enough to clear the length filter.</p>"
+        )
+        assert "formula" in out and "shown above" in out
+
+    def test_ordinary_prose_is_unaffected(self):
+        from ragverify.websearch import _extract_text
+
+        out = _extract_text(
+            "<p>European revenue grew 34% year over year to 2.1 billion euro in "
+            "the third quarter of 2024 across all reporting segments.</p>"
+        )
+        assert "34%" in out and "2.1 billion" in out
+
+
+class TestTableExtraction:
+    """Short table cells carry the data; a length filter throws them away.
+
+    "10.0.0.0/8" is ten characters. Filtering short lines as chrome keeps the
+    prose column and silently discards the column with the facts in it — the
+    page still reads coherently and has lost exactly what was asked for.
+    """
+
+    def test_table_cells_survive(self):
+        from ragverify.websearch import _extract_text
+
+        out = _extract_text(
+            "<table><tr><td>169.254.0.0/16</td><td>Used for link-local addresses "
+            "between two hosts on a single link</td></tr>"
+            "<tr><td>127.0.0.0/8</td><td>Used for loopback addresses to the local "
+            "host, a virtual interface</td></tr></table>"
+        )
+        assert "169.254.0.0/16" in out
+        assert "127.0.0.0/8" in out
+        assert "link-local" in out
+
+    def test_short_data_line_kept_short_chrome_dropped(self):
+        from ragverify.websearch import _extract_text
+
+        out = _extract_text("<table><tr><td>10.0.0.0/8</td></tr></table><p>Menu</p><p>Home</p>")
+        assert "10.0.0.0/8" in out
+        assert "Menu" not in out and "Home" not in out
+
+    def test_cells_are_separated_not_concatenated(self):
+        from ragverify.websearch import _extract_text
+
+        out = _extract_text("<table><tr><td>203.0.113.0/24</td><td>Documentation</td></tr></table>")
+        assert "203.0.113.0/24Documentation" not in out
