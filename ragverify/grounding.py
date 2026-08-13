@@ -27,13 +27,9 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable, Sequence
 
+from . import normalize
 from .retrieval import STOPWORDS, analyze
 from .schemas import AnswerAudit, Claim, EvidenceItem, GroundingReport
-
-# Numbers, percentages, years, money. These are what models most often
-# fabricate while otherwise paraphrasing the source correctly, and they are
-# cheap to verify exactly.
-_NUMERIC = re.compile(r"\$?\d[\d,]*\.?\d*%?")
 
 # Default share of a claim's content words that must appear in the cited
 # source. Tuned on the eval set in ``evals/``: lower admits paraphrase but
@@ -45,10 +41,6 @@ def _content_terms(text: str) -> set[str]:
     return {t for t in analyze(text) if t not in STOPWORDS and len(t) > 2}
 
 
-def _numbers(text: str) -> set[str]:
-    return {m.group(0).rstrip(".").replace(",", "") for m in _NUMERIC.finditer(text)}
-
-
 def claim_support(
     claim_text: str,
     source_text: str,
@@ -57,10 +49,10 @@ def claim_support(
     """Does ``source_text`` support ``claim_text``?
 
     Returns ``(supported, overlap_ratio)``. Support requires both that enough
-    of the claim's content words appear in the source, and that every number
-    in the claim appears in the source -- a claim asserting "revenue grew 34%"
-    against a source that never says 34 is rejected regardless of how well the
-    surrounding prose matches.
+    of the claim's content words appear in the source, and that every figure
+    and date in the claim appears in the source in some equivalent form -- a
+    claim asserting "revenue grew 34%" against a source that never says 34% is
+    rejected regardless of how well the surrounding prose matches.
     """
     claim_terms = _content_terms(claim_text)
     if not claim_terms:
@@ -69,8 +61,12 @@ def claim_support(
     source_terms = _content_terms(source_text)
     overlap = len(claim_terms & source_terms) / len(claim_terms)
 
-    claim_numbers = _numbers(claim_text)
-    if claim_numbers and not claim_numbers.issubset(_numbers(source_text)):
+    # Values are compared in canonical form, so "2.1 billion euro" and
+    # "EUR 2,100,000,000" are one fact rather than two, while "34%" can no
+    # longer be satisfied by "34 staff" and "$5M" cannot be satisfied by
+    # "EUR 5M". Raw string comparison got both of those wrong in opposite
+    # directions.
+    if normalize.unsupported_values(claim_text, source_text):
         return False, overlap
 
     return overlap >= threshold, overlap

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from ragverify.grounding import check, claim_support, strip_unsupported
 from ragverify.schemas import Claim, EvidenceItem, Route
 
@@ -164,3 +166,71 @@ class TestAnswerAudit:
             SOURCES,
         )
         assert audit.verified_rate == 1.0
+
+
+class TestValueNormalization:
+    """Figures must compare by value, not by spelling.
+
+    Raw string comparison failed in both directions: it rejected correct
+    claims written in a different format, and accepted a percentage validated
+    by an unrelated headcount.
+    """
+
+    @pytest.mark.parametrize(
+        "claim,source",
+        [
+            ("Revenue was 2.1 billion euro", "Revenue was EUR 2,100,000,000"),
+            ("Revenue was €2.1B", "Revenue was 2.1 billion euro"),
+            ("Margin was 34%", "Margin was 34 percent"),
+            ("Cash was $1.5M", "Cash was 1,500,000 USD"),
+            ("Revenue was €2.1 billion", "Revenue reached 2.1 billion"),
+            ("Reported in October 2024", "Reported on 2024-10-15"),
+            ("Results for Q3 2024", "Results for the third quarter of 2024"),
+            ("Guidance for FY2025", "Guidance for fiscal 2025"),
+        ],
+    )
+    def test_equivalent_forms_match(self, claim, source):
+        from ragverify.normalize import unsupported_values
+
+        assert not unsupported_values(claim, source), f"{claim!r} should match {source!r}"
+
+    @pytest.mark.parametrize(
+        "claim,source",
+        [
+            ("Margin was 34%", "Headcount was 34 staff"),      # type confusion
+            ("Margin was 47%", "Margin was 34%"),               # wrong figure
+            ("Revenue was 2.1 billion", "Revenue was 2.1 million"),  # 1000x error
+            ("Cash was $5M", "Cash was €5M"),                   # wrong currency
+            ("Headcount was 412", "Headcount was 380"),
+            ("Results for Q3 2024", "Results for Q4 2024"),
+            ("Guidance for FY2027", "Guidance for fiscal 2025"),
+        ],
+    )
+    def test_different_values_are_rejected(self, claim, source):
+        from ragverify.normalize import unsupported_values
+
+        assert unsupported_values(claim, source), f"{claim!r} must NOT match {source!r}"
+
+    def test_grounding_uses_normalized_values(self):
+        # End-to-end: the same fact in two formats must ground.
+        item = EvidenceItem(
+            source_id="S1", label="a",
+            text="European revenue grew 34 percent to EUR 2,100,000,000 in the third quarter of 2024.",
+            origin=Route.LOCAL,
+        )
+        report = check(
+            [Claim(text="European revenue grew 34% to €2.1 billion in Q3 2024", citations=["S1"])],
+            [item],
+        )
+        assert len(report.supported) == 1
+
+    def test_grounding_still_rejects_a_wrong_figure(self):
+        item = EvidenceItem(
+            source_id="S1", label="a",
+            text="European revenue grew 34 percent year over year.", origin=Route.LOCAL,
+        )
+        report = check(
+            [Claim(text="European revenue grew 43 percent year over year", citations=["S1"])],
+            [item],
+        )
+        assert len(report.unsupported) == 1, "a transposed figure must still fail"

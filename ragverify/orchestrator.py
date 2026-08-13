@@ -40,6 +40,7 @@ from . import grounding as grounding_mod
 from .budget import Budget, BudgetExceeded, CircuitBreaker
 from .config import Settings
 from .ingest import Document, build_index, corpus_summary, top_terms
+from .ledger import EvidenceLedger
 from .llm import LLMClient, LLMError, SchemaError
 from .retrieval import DenseIndex, HybridRetriever
 from .schemas import (
@@ -182,6 +183,9 @@ class AdaptiveResearcher:
         # rendering. The content is verified, but generation proved
         # unreliable, and confidence should say so.
         self.synthesis_degraded = False
+        # Append-only audit trail. Built during the run so it captures each
+        # passage as it was actually used, including the pre-sanitisation body.
+        self.ledger: EvidenceLedger | None = None
         # One budget object, shared. Without this the client meters its own
         # calls while the loop meters a different counter, and neither sees
         # the whole run.
@@ -197,6 +201,7 @@ class AdaptiveResearcher:
         tracer.emit(EventKind.START, f"Researching: {question}")
 
         rounds: list[RoundRecord] = []
+        self.ledger = EvidenceLedger(question)
 
         # Measure coverage BEFORE routing. Judging "document coverage" from
         # filenames and a chunk count is guesswork; this probes the index with
@@ -257,13 +262,26 @@ class AdaptiveResearcher:
                 break
 
             # Retrieved text is untrusted input. Neutralize model-directed
-            # instructions before it reaches any prompt.
+            # instructions before it reaches any prompt. The raw body is kept
+            # first: grounding checks the sanitised text, so an audit needs
+            # both to show what the filter changed.
+            raw_by_id = {e.source_id: e.text for e in evidence}
+            flags_by_id: dict[str, list[str]] = {}
             if settings.sanitize_sources:
                 evidence, detections = sanitize.sanitize_evidence(evidence)
                 if detections:
                     note = sanitize.summarize(detections)
                     self.injections.extend(sorted({d.kind for d in detections}))
                     self._warn(note, index)
+                    for det in detections:
+                        flags_by_id.setdefault(det.source_id, []).append(det.kind)
+
+            for item in evidence:
+                self.ledger.record_evidence(
+                    item,
+                    raw_text=raw_by_id.get(item.source_id),
+                    injection_flags=sorted(set(flags_by_id.get(item.source_id, []))),
+                )
 
             tracer.emit(
                 EventKind.RESEARCH,
@@ -274,6 +292,7 @@ class AdaptiveResearcher:
             draft = self._draft(question, evidence)
 
             grounding = grounding_mod.check(draft.claims, evidence)
+            self.ledger.record_grounding(grounding, index)
             tracer.emit(
                 EventKind.GROUND,
                 f"Round {index}: {len(grounding.supported)}/{grounding.total} claims grounded"
@@ -362,6 +381,7 @@ class AdaptiveResearcher:
             outcome = Outcome.ANSWERED
 
         self._sync_budget()
+        self.ledger.freeze()
         result = ResearchResult(
             question=question,
             final_answer=final_answer,
@@ -376,6 +396,7 @@ class AdaptiveResearcher:
             warnings=self.warnings + (self.corpus.retriever.warnings if self.corpus else []),
             injections_detected=sorted(set(self.injections)),
             answer_audit=audit,
+            ledger=self.ledger.to_dict(include_text=False),
             budget=self.budget.snapshot(),
             elapsed_s=round(time.time() - started, 2),
         )

@@ -10,7 +10,7 @@ the boundary that produced it, where the repair loop in ``llm.py`` can see it.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -304,6 +304,10 @@ class ResearchResult(BaseModel):
     clarifying_question: str | None = None
     # Re-verification of the answer text the user actually sees.
     answer_audit: AnswerAudit | None = None
+    # Audit trail: content hashes, claim-to-source edges and sanitiser
+    # modifications. Text is excluded here so the result stays shareable;
+    # the full ledger with bodies is on the researcher.
+    ledger: dict[str, Any] = Field(default_factory=dict)
     budget: dict[str, float] = Field(default_factory=dict)
     elapsed_s: float = 0.0
 
