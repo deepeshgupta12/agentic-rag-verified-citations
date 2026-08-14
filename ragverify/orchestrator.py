@@ -88,15 +88,29 @@ class Corpus:
         settings: Settings,
         client: LLMClient | None = None,
         tracer: Tracer | None = None,
+        principal=None,
+        policy=None,
     ) -> None:
         self.settings = settings
         self.documents = list(documents)
+        self.warnings: list[str] = []
         self.chunks: list[Chunk] = build_index(
             self.documents, settings.chunk_tokens, settings.chunk_overlap_tokens
         )
+
+        # Access control is applied at the INDEX, before any scoring.
+        # Post-filtering a ranked list still leaks through the ranking:
+        # result counts, scores and orderings are all computed over documents
+        # the caller cannot read.
+        self.denied_documents: list[str] = []
+        if principal is not None and policy is not None:
+            before = len(self.chunks)
+            self.chunks = policy.filter_chunks(principal, self.chunks)
+            self.denied_documents = sorted(policy.denied)
+            if before != len(self.chunks):
+                self.warnings.append(policy.summary())
         self.summary = corpus_summary(self.chunks)
         self.terms = top_terms(self.chunks)
-        self.warnings: list[str] = []
 
         dense: DenseIndex | None = None
         embed_query = None
