@@ -75,11 +75,24 @@ class Chunk(BaseModel):
     text: str
     n_tokens: int = 0
     page: int | None = None
+    # Table provenance, set only for rows extracted from a table. A citation
+    # to "p.3" is not checkable when the fact is one cell of a forty-row
+    # table; these make it so.
+    table_id: int | None = None
+    row_index: int | None = None
+    headers: list[str] = Field(default_factory=list)
+    table_caption: str = ""
 
     @property
     def label(self) -> str:
         loc = f"p.{self.page}" if self.page is not None else f"#{self.ordinal}"
+        if self.table_id is not None:
+            loc += f" table {self.table_id + 1} row {self.row_index + 1}"
         return f"{self.doc_name} {loc}"
+
+    @property
+    def is_table_row(self) -> bool:
+        return self.table_id is not None
 
 
 class WebResult(BaseModel):

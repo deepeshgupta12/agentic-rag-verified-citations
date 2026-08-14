@@ -21,6 +21,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
+from . import tables as tables_mod
 from .schemas import Chunk
 from .tokens import count_tokens, split_tokens
 
@@ -171,6 +172,7 @@ def build_index(
     documents: Sequence[Document],
     chunk_tokens: int = 320,
     overlap_tokens: int = 64,
+    table_aware: bool = True,
 ) -> list[Chunk]:
     """Flatten documents into globally-addressable chunks.
 
@@ -183,7 +185,37 @@ def build_index(
         did = _doc_id(doc.name, doc.text)
         ordinal = 0
         for page_no, page_text in enumerate(doc.pages, start=1):
-            for piece in chunk_page(page_text, chunk_tokens, overlap_tokens):
+            # Table rows are chunked individually and carry their headers, so
+            # a row retrieved alone still says what its numbers measure.
+            # Paragraph chunking splits a table wherever the token budget
+            # lands, which can strand "Eastern 250 9% 190" several chunks from
+            # the header row: retrievable, groundable, and meaningless.
+            table_lines: set[int] = set()
+            if table_aware:
+                blocks = tables_mod.find_tables(page_text)
+                table_lines = tables_mod.table_line_span(blocks)
+                for block in blocks:
+                    for row in block.rows:
+                        ordinal += 1
+                        text = row.as_text()
+                        if block.caption:
+                            text = f"{block.caption} — {text}"
+                        index.append(Chunk(
+                            chunk_id=f"{did}-{ordinal}", doc_name=doc.name,
+                            ordinal=ordinal, text=text, n_tokens=count_tokens(text),
+                            page=page_no if doc.n_pages > 1 else None,
+                            table_id=row.table_id, row_index=row.row_index,
+                            headers=row.headers, table_caption=block.caption,
+                        ))
+
+            prose = page_text
+            if table_lines:
+                prose = "\n".join(
+                    line for n, line in enumerate(page_text.splitlines())
+                    if n not in table_lines
+                )
+
+            for piece in chunk_page(prose, chunk_tokens, overlap_tokens):
                 ordinal += 1
                 index.append(
                     Chunk(
