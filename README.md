@@ -5,7 +5,7 @@
 [![CI](https://github.com/deepeshgupta12/agentic-rag-verified-citations/actions/workflows/ci.yml/badge.svg)](https://github.com/deepeshgupta12/agentic-rag-verified-citations/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-397%20passing-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-424%20passing-brightgreen)](tests/)
 
 *Agentic RAG · citation verification · NLI entailment · hallucination resistance · self-correcting retrieval · multi-hop*
 
@@ -244,11 +244,47 @@ Route accuracy is **exact match**, with hybrid tracked separately as over-retrie
 
 Live evals run on manual dispatch, on PRs labelled `run-evals`, and weekly. The schedule catches drift in the *model behind the API* — the failure a commit-triggered run cannot see, because nothing in the repository changed.
 
+### Human-labelled groundedness
+
+The pipeline cannot grade itself. Every quality number above — support rates,
+citation validity, both real-document suites — was produced by the same
+lexical rules the product uses to decide, which measures self-consistency
+rather than correctness.
+
+`evals/annotate/` is the harness for an independent reference:
+
+```bash
+python -m evals.annotate.cli extract --questions q.txt --docs ./corpus
+python -m evals.annotate.cli label --annotator alice     # and bob, …
+python -m evals.annotate.cli agreement                   # Cohen's / Fleiss' κ
+python -m evals.annotate.cli adjudicate --annotator lead
+python -m evals.annotate.cli score                       # precision / recall vs gold
+```
+
+Two decisions shape whether the labels are worth anything. The pipeline's own
+verdict is **stored but never shown** while labelling — an annotator told what
+the system decided agrees with it more often, and the result measures
+suggestion. And items are presented in a **per-annotator shuffle**, because
+retrieval order front-loads the easy citations and puts all the fatigue on the
+hard ones.
+
+Both accepted *and* rejected citations are extracted: scoring only accepted
+ones measures precision and leaves recall unmeasurable, so the citations
+wrongly discarded would never be seen.
+
+[Annotation guidelines](evals/annotate/GUIDELINES.md) settle the ambiguous
+cases in advance — below κ 0.6 the usual cause is a category the guidelines
+miss, and adding a rule is far cheaper than labelling more items at low
+agreement.
+
+**No labels are committed.** This is the harness, not the dataset; the
+judgements need annotators.
+
 ## Testing
 
 ```bash
 pip install -e ".[dev]"
-pytest                    # 397 tests, no API key, no network
+pytest                    # 424 tests, no API key, no network
 ```
 
 Tests run against a scripted fake LLM that *subclasses the real client*, so retries, usage accounting and the structured-output path are exercised rather than stubbed.
@@ -306,7 +342,7 @@ Deeper notes in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Roadmap
 
-- Human-labelled groundedness set with inter-annotator agreement
+- Human-labelled groundedness dataset — the harness exists (`evals/annotate/`); the labels need annotators
 - Contradiction **resolution** — recency, authority and domain rules on top of the existing detector
 - Table-aware chunking with cell-level provenance
 - Streaming answers with incremental verification

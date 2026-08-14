@@ -18,3 +18,6 @@ evals/results/
 # local embedding cache
 .cache/
 *.npz
+
+# annotation labels are per-team data, not repository content
+evals/annotate/data/
