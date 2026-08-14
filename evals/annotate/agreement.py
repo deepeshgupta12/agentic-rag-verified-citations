@@ -102,6 +102,42 @@ def fleiss_kappa(ratings: Sequence[Sequence[str]]) -> float:
     return (observed - expected) / (1 - expected)
 
 
+def retest_report(first: dict[str, str], second: dict[str, str]) -> dict[str, object]:
+    """Test-retest reliability for a single annotator.
+
+    One annotator gives a usable gold set but no inter-annotator agreement, so
+    nothing reveals whether the guidelines are working or whether judgement
+    drifted across a long session. Re-labelling a sample after a gap measures
+    self-consistency instead.
+
+    It is a weaker signal and worth being precise about why: it cannot catch a
+    rule the annotator consistently misreads, because they will misread it the
+    same way twice. What it does catch is drift and coin-flipping on the hard
+    cases, which is the failure a long solo session actually produces.
+    """
+    shared = sorted(set(first) & set(second))
+    if not shared:
+        return {"kappa": None, "note": "no items were labelled twice"}
+
+    kappa = cohens_kappa([first[i] for i in shared], [second[i] for i in shared])
+    changed = [i for i in shared if first[i] != second[i]]
+    return {
+        "method": "test-retest",
+        "kappa": round(kappa, 3),
+        "interpretation": interpret(kappa),
+        "items_compared": len(shared),
+        "changed": len(changed),
+        "stability": round(1 - len(changed) / len(shared), 3),
+        "reliable": len(shared) >= 40,
+        # Named so it is not mistaken for inter-annotator agreement in a
+        # report someone reads later.
+        "caveat": (
+            "self-consistency, not inter-annotator agreement: it cannot detect "
+            "a guideline the annotator consistently misreads"
+        ),
+    }
+
+
 def agreement_report(
     by_annotator: dict[str, dict[str, str]],
 ) -> dict[str, object]:
@@ -112,12 +148,26 @@ def agreement_report(
     reported rather than silently dropped, because a small overlap makes any
     kappa unreliable and the reader should see that.
     """
+    # A retest pass is the same person, so comparing it as a second annotator
+    # would report self-consistency as if it were agreement.
+    retests = {n for n in by_annotator if n.endswith("-retest")}
+    for name in sorted(retests):
+        base = name.removesuffix("-retest")
+        if base in by_annotator:
+            return retest_report(by_annotator[base], by_annotator[name]) | {
+                "annotators": [base], "single_annotator": True,
+            }
+
     names = sorted(by_annotator)
     if len(names) < 2:
         return {
             "annotators": names,
             "kappa": None,
-            "note": "at least two annotators are required",
+            "single_annotator": True,
+            "note": (
+                "at least two annotators are required for kappa; with one, run "
+                "`retest --annotator NAME` after a gap to measure self-consistency"
+            ),
         }
 
     shared = set.intersection(*(set(by_annotator[n]) for n in names))

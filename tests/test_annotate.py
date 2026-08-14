@@ -155,3 +155,44 @@ class TestGoldItem:
         """Five-second judgements on dense passages are visible in the data."""
         a = Annotation(item_id="x", annotator="alice", label=Label.SUPPORTED, seconds=31.4)
         assert a.seconds > 0
+
+
+class TestSingleAnnotator:
+    """One annotator gives a gold set but no inter-annotator agreement."""
+
+    def test_reports_that_kappa_needs_two(self):
+        report = agreement_report({"deepesh": {"i1": "supported"}})
+        assert report["kappa"] is None
+        assert report["single_annotator"]
+        assert "retest" in report["note"]
+
+    def test_retest_measures_self_consistency(self):
+        from evals.annotate.agreement import retest_report
+
+        first = {"i1": "supported", "i2": "partial", "i3": "unsupported", "i4": "supported"}
+        second = {"i1": "supported", "i2": "supported", "i3": "unsupported", "i4": "supported"}
+        report = retest_report(first, second)
+
+        assert report["method"] == "test-retest"
+        assert report["changed"] == 1
+        assert report["stability"] == 0.75
+
+    def test_retest_is_not_reported_as_agreement(self):
+        """Comparing a retest as a second annotator would report
+        self-consistency as if it were agreement."""
+        labels = {"i1": "supported", "i2": "partial"}
+        report = agreement_report({"deepesh": labels, "deepesh-retest": labels})
+
+        assert report["method"] == "test-retest"
+        assert report["single_annotator"]
+        assert "cannot detect" in report["caveat"]
+
+    def test_retest_needs_overlap(self):
+        from evals.annotate.agreement import retest_report
+
+        assert retest_report({"i1": "supported"}, {"i2": "partial"})["kappa"] is None
+
+    def test_small_retest_flagged_unreliable(self):
+        from evals.annotate.agreement import retest_report
+
+        assert not retest_report({"i1": "supported"}, {"i1": "supported"})["reliable"]

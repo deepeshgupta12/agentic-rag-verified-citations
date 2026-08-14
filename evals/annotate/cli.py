@@ -147,9 +147,7 @@ def cmd_label(args: argparse.Namespace) -> int:
         print(f"no items; run extract first ({ITEMS} missing)", file=sys.stderr)
         return 1
 
-    path = _annotations_path(args.annotator)
-    done = {a.item_id: a for a in _read(path, Annotation)}
-    annotations = list(done.values())
+    done = {a.item_id for a in _read(_annotations_path(args.annotator), Annotation)}
 
     # Per-annotator shuffle, seeded by name so a session can be resumed in the
     # same order. Retrieval order front-loads the easy pairs, which puts all
@@ -162,6 +160,14 @@ def cmd_label(args: argparse.Namespace) -> int:
         print(f"{args.annotator}: nothing left to label ({len(done)} done)", file=sys.stderr)
         return 0
 
+    return _label_queue(queue, args.annotator, args.chars)
+
+
+def _label_queue(queue: list, annotator: str, chars: int) -> int:
+    """The interactive labelling loop, shared by label and retest."""
+    path = _annotations_path(annotator)
+    annotations = _read(path, Annotation)
+
     print(f"\n{len(queue)} item(s) to label. Keys: "
           "[s]upported [p]artial [u]nsupported [c]ontradicted [?]unclear "
           "[n]ote [b]ack [q]uit\n")
@@ -173,10 +179,10 @@ def cmd_label(args: argparse.Namespace) -> int:
         print(f"({index + 1}/{len(queue)})  QUESTION: {item.question}")
         print(f"\nCLAIM:\n  {item.claim}")
         print(f"\nCITED PASSAGE  [{item.source_id}] {item.source_label}:\n")
-        for line in item.source_text[: args.chars].splitlines():
+        for line in item.source_text[:chars].splitlines():
             print(f"  {line}")
-        if len(item.source_text) > args.chars:
-            print(f"  … ({len(item.source_text) - args.chars} more characters)")
+        if len(item.source_text) > chars:
+            print(f"  … ({len(item.source_text) - chars} more characters)")
         print("\nDoes this passage support this claim?")
 
         started = time.time()
@@ -198,7 +204,7 @@ def cmd_label(args: argparse.Namespace) -> int:
                 continue
             if key in _KEYS:
                 annotations.append(Annotation(
-                    item_id=item.item_id, annotator=args.annotator,
+                    item_id=item.item_id, annotator=annotator,
                     label=_KEYS[key], note=note,
                     seconds=round(time.time() - started, 1),
                 ))
@@ -224,6 +230,43 @@ def _load_all_labels() -> dict[str, dict[str, str]]:
         name = path.stem.removeprefix("labels-")
         out[name] = {a.item_id: a.label.value for a in _read(path, Annotation)}
     return out
+
+
+def cmd_retest(args: argparse.Namespace) -> int:
+    """Re-label a sample already labelled, to measure self-consistency.
+
+    A single annotator produces a usable gold set but no inter-annotator
+    agreement, so there is no way to tell whether the guidelines are working
+    or whether judgement drifted across a long session. Re-labelling a sample
+    after a gap gives test-retest reliability, which plays the role kappa
+    would: it will not catch a rule you consistently misread, but it does
+    catch drift and coin-flipping on the hard cases.
+
+    Labels are written to a separate annotator name, so the original pass is
+    never overwritten and the two can be compared.
+    """
+    original = _annotations_path(args.annotator)
+    done = _read(original, Annotation)
+    if not done:
+        print(f"no labels for {args.annotator} to retest", file=sys.stderr)
+        return 1
+
+    sample = list(done)
+    random.Random(f"retest-{args.annotator}").shuffle(sample)
+    sample = sample[: args.sample]
+
+    items = {i.item_id: i for i in _read(ITEMS, AnnotationItem)}
+    retest_name = f"{args.annotator}-retest"
+    already = {a.item_id for a in _read(_annotations_path(retest_name), Annotation)}
+    queue = [items[a.item_id] for a in sample if a.item_id in items and a.item_id not in already]
+
+    if not queue:
+        print("retest sample already complete", file=sys.stderr)
+        return 0
+
+    print(f"\nRe-labelling {len(queue)} item(s) you have already judged.")
+    print("Judge them fresh — do not try to recall your previous answer.\n")
+    return _label_queue(queue, retest_name, args.chars)
 
 
 def cmd_agreement(args: argparse.Namespace) -> int:
@@ -383,6 +426,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--limit", type=int, default=100, help="items this session")
     p.add_argument("--chars", type=int, default=1200, help="passage characters to show")
     p.set_defaults(func=cmd_label)
+
+    p = sub.add_parser(
+        "retest",
+        help="re-label a sample to measure self-consistency (single annotator)",
+    )
+    p.add_argument("--annotator", required=True)
+    p.add_argument("--sample", type=int, default=50)
+    p.add_argument("--chars", type=int, default=1200)
+    p.set_defaults(func=cmd_retest)
 
     p = sub.add_parser("agreement", help="inter-annotator agreement")
     p.set_defaults(func=cmd_agreement)

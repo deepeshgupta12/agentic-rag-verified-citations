@@ -5,7 +5,7 @@
 [![CI](https://github.com/deepeshgupta12/agentic-rag-verified-citations/actions/workflows/ci.yml/badge.svg)](https://github.com/deepeshgupta12/agentic-rag-verified-citations/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-424%20passing-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-471%20passing-brightgreen)](tests/)
 
 *Agentic RAG · citation verification · NLI entailment · hallucination resistance · self-correcting retrieval · multi-hop*
 
@@ -257,6 +257,7 @@ rather than correctness.
 python -m evals.annotate.cli extract --questions q.txt --docs ./corpus
 python -m evals.annotate.cli label --annotator alice     # and bob, …
 python -m evals.annotate.cli agreement                   # Cohen's / Fleiss' κ
+python -m evals.annotate.cli retest --annotator alice    # single-annotator reliability
 python -m evals.annotate.cli adjudicate --annotator lead
 python -m evals.annotate.cli score                       # precision / recall vs gold
 ```
@@ -277,6 +278,14 @@ cases in advance — below κ 0.6 the usual cause is a category the guidelines
 miss, and adding a rule is far cheaper than labelling more items at low
 agreement.
 
+**Working alone?** One annotator gives a usable gold set but no κ, so nothing
+tells you whether the guidelines are working or whether judgement drifted
+across a long session. `retest` re-labels a sample after a gap and reports
+self-consistency instead — weaker, and precisely so: it cannot catch a rule
+you consistently misread, because you will misread it the same way twice. It
+does catch drift and coin-flipping on the hard cases, which is what a long
+solo session actually produces.
+
 **No labels are committed.** This is the harness, not the dataset; the
 judgements need annotators.
 
@@ -284,7 +293,7 @@ judgements need annotators.
 
 ```bash
 pip install -e ".[dev]"
-pytest                    # 424 tests, no API key, no network
+pytest                    # 471 tests, no API key, no network
 ```
 
 Tests run against a scripted fake LLM that *subclasses the real client*, so retries, usage accounting and the structured-output path are exercised rather than stubbed.

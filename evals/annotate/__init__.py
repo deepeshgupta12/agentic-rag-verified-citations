@@ -11,7 +11,7 @@ passage supports a claim, disagreements are measured rather than hidden, and
 the pipeline is scored against the resolved labels.
 """
 
-from .agreement import cohens_kappa, fleiss_kappa, interpret
+from .agreement import cohens_kappa, fleiss_kappa, interpret, retest_report
 from .schema import Annotation, AnnotationItem, GoldItem, Label
 
 __all__ = [
@@ -22,4 +22,5 @@ __all__ = [
     "cohens_kappa",
     "fleiss_kappa",
     "interpret",
+    "retest_report",
 ]
