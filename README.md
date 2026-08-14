@@ -203,7 +203,7 @@ python evals/run_eval.py --out results.json          # one run
 python evals/compare.py results.json baseline.json   # non-zero on regression
 ```
 
-**There is no committed baseline.** One existed and was removed: it covered 13 cases against a 25-case dataset at a 61.5% pass rate, so it compared unlike samples and enshrined failures. A wrong gate is worse than no gate, because it reports that quality was enforced when nothing was checked. Generate your own with `--out baseline.json` after a full run on your configuration.
+**The regression gate is inactive until a baseline is committed.** One existed and was removed: it covered 13 cases against a 25-case dataset at a 61.5% pass rate, so it compared unlike samples and enshrined failures. A wrong gate is worse than no gate, because it reports that quality was enforced when nothing was checked. Generate your own with `--out baseline.json` after a full run on your configuration.
 
 Comparison is a separate script deliberately. Re-running the suite to compare would double the cost and, with a nondeterministic model, compare a *different sample* against the baseline — so ordinary variance reads as regression. `compare.py` reads the results already produced and refuses outright when the baseline covers a different number of cases.
 
@@ -284,15 +284,15 @@ Deeper notes in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Limitations
 
-- **Disclosures are declared, not detected.** A claim marked as a gap ("the sources do not give a 2027 forecast") is checked for a real citation but cannot be checked for content — a source cannot contain words confirming what it omits. A model that mislabels an assertion as a disclosure can still place it under "What this doesn't cover", where it reads as a gap rather than a fact but is still text the reader sees.
-- **The advanced stages are opt-in.** Entailment, reranking and multi-hop are off by default, so a stock configuration runs lexical grounding plus the answer audit. Enable them for higher assurance at roughly 2–4× latency.
+- **Disclosures are declared, not detected.** A claim marked as a gap ("the sources do not give a 2027 forecast") is checked for a real citation but cannot be checked for content — a source cannot contain words confirming what it omits. A model that mislabels an assertion as a disclosure can still place it under "What this doesn't cover", where it reads as a gap rather than a fact but is still text the reader sees. This is the one remaining path by which model-chosen wording reaches you unverified; there is deliberately no free-text field anywhere else in the answer.
+- **The advanced stages are opt-in.** Entailment, reranking and multi-hop are off by default, so a stock configuration runs lexical grounding plus the answer gate. Enabling them raises assurance and cost; the multiple depends on your corpus, model and how often the loop escalates, so treat any figure here as an order of magnitude rather than a benchmark.
 - **With entailment off (the default), grounding is recall-based.** "Most regions" cited for "all regions" still passes. Turn it on with `use_entailment=True` for the semantic check.
 - **Entailment is itself a model judgement** and can be wrong. It only ever *downgrades* — a claim rejected lexically is never revived — so enabling it cannot make the pipeline accept something it previously refused.
-- **Source authority is a coarse heuristic**: domain suffix plus a small known-domain table. An unrecognised domain scores neutral rather than bad, but a well-presented unreliable site scores the same as a good one.
-- **Contradictions are surfaced, not adjudicated.** When two sources disagree, both are reported; the pipeline does not decide which is right.
+- **Source scoring combines four signals; authority itself is coarse.** Freshness, domain diversity and cross-domain corroboration are measured, but *authority* is a domain-suffix and known-domain table, so an unrecognised domain and a well-presented unreliable one score the same neutral value. It applies to **web sources only** — uploaded documents are not scored, since the user chose them.
+- **Cross-source contradictions are neither deterministically detected nor adjudicated.** The synthesizer is instructed to surface conflicting claims, but reporting both sides is not guaranteed — there is no contradiction detector, and entailment only checks a claim against its own citation, never one source against another.
 - **Multi-hop planning is opt-in and imperfect.** The planner sometimes judges a question single-hop when chaining would have helped.
 - **SSRF protection resolves addresses at validation time.** Every redirect hop is re-checked, but DNS rebinding — the address changing between check and connection — needs connection-time pinning, which this does not do.
-- **Long documents are truncated at `fetch_max_chars`.** A specification cut at the cap loses whole sections while the remaining text still reads coherently, so a question about a missing section gets a truthful "the sources do not state this" about a document that does. Truncation is now warned about rather than silent — raise the setting for standards or regulatory corpora.
+- **Fetched web pages are truncated at `fetch_max_chars`** (uploaded documents are not; a separate 5 MB cap bounds the HTTP body). A specification cut at the cap loses whole sections while the remaining text still reads coherently, so a question about a missing section gets a truthful "the sources do not state this" about a document that does. Truncation is warned about rather than silent — raise the setting for standards or regulatory corpora.
 - **25 synthetic cases is a smoke test, not a benchmark.** There is no human-labelled groundedness set, and coverage thresholds are tuned on these fixtures. Re-tune them on your data.
 
 ## Roadmap

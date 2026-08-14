@@ -124,7 +124,6 @@ Rules:
   "the sources do not give a 2027 forecast", not "there is no 2027 forecast".
   A disclosure is a statement about the evidence, not a fact about the world.
 - Never restate a claim that failed verification.
-- `lead` is one optional framing sentence. It must contain no facts.
 
 A short, fully supported answer is the correct outcome. Claims that cannot be
 supported belong in `disclosure` or nowhere."""

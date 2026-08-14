@@ -1210,10 +1210,10 @@ class AdaptiveResearcher:
                         "verification and were removed."
                     )
                     _, audit = grounding_mod.verify_structured_answer(
-                        StructuredAnswer(claims=verified, lead=structured.lead), evidence
+                        StructuredAnswer(claims=verified), evidence
                     )
                 return (
-                    grounding_mod.render_answer(verified, structured.lead),
+                    grounding_mod.render_answer(verified),
                     self._confidence(grounding, self._last_verifier, audit),
                     audit,
                 )

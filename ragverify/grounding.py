@@ -382,19 +382,17 @@ def verify_structured_answer(
     return verified, audit
 
 
-def render_answer(claims: Sequence[AnswerClaim], lead: str = "") -> str:
+def render_answer(claims: Sequence[AnswerClaim]) -> str:
     """Render markdown from verified claims only.
 
-    Generated rather than model-written, so there is no uncited prose to
-    classify: every line the reader sees came through verification.
+    Every line the reader sees came through verification. There is no
+    free-text parameter by design: a framing line that bypasses the check is
+    unverified text reaching the reader regardless of what it is called.
     """
     assertions = [c for c in claims if c.kind is AnswerClaimKind.ASSERTION]
     disclosures = [c for c in claims if c.kind is AnswerClaimKind.DISCLOSURE]
 
     lines: list[str] = []
-    if lead.strip():
-        lines += [lead.strip(), ""]
-
     for claim in assertions:
         cites = " ".join(f"[{c}]" for c in claim.citations)
         lines.append(f"- {claim.text.rstrip('.')}. {cites}".rstrip())

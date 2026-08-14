@@ -183,12 +183,20 @@ class AnswerClaim(BaseModel):
 
 
 class StructuredAnswer(BaseModel):
-    """The synthesizer's output: claims, not prose."""
+    """The synthesizer's output: claims, not prose.
+
+    There is deliberately no free-text field. An earlier version had a `lead`
+    for one line of framing, instructed to contain no facts and rendered
+    verbatim -- which reintroduced exactly the hole structured synthesis
+    exists to close. A fabricated lead sat above verified claims while the
+    audit reported the answer clean, because nothing checked it.
+
+    An instruction is not an enforcement. Any channel that reaches the reader
+    without passing verification is a way for unverified text to reach the
+    reader, however it is labelled.
+    """
 
     claims: list[AnswerClaim] = Field(default_factory=list)
-    # Optional one-line framing. Rendered verbatim and never treated as a
-    # factual claim, so it may not contain assertions.
-    lead: str = Field(default="", max_length=200)
 
 
 class ResearchDraft(BaseModel):

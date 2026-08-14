@@ -506,3 +506,36 @@ class TestStructuredSynthesisClosesTheHeuristicHoles:
                 StructuredAnswer(claims=[AnswerClaim(text=text)]), ev
             )
             assert not audit.is_clean, f"{text!r} passed without a citation"
+
+    def test_no_unverified_text_channel_exists(self):
+        """A framing line that bypasses the check is still unverified text.
+
+        StructuredAnswer briefly carried a `lead` field, instructed to contain
+        no facts and rendered verbatim. A fabricated lead sat above verified
+        claims while the audit reported clean, because nothing checked it. An
+        instruction is not an enforcement.
+        """
+        from ragverify.grounding import render_answer, verify_structured_answer
+        from ragverify.schemas import EvidenceItem, Route, StructuredAnswer
+
+        ev = [EvidenceItem(source_id="S1", label="a",
+                           text="European revenue grew 34% year over year.", origin=Route.LOCAL)]
+        # A model that still emits a lead must not get it rendered.
+        answer = StructuredAnswer.model_validate({
+            "lead": "Revenue fell 80% and the CEO resigned.",
+            "claims": [{"text": "European revenue grew 34% year over year",
+                        "citations": ["S1"]}],
+        })
+        verified, audit = verify_structured_answer(answer, ev)
+        rendered = render_answer(verified)
+
+        assert "Revenue fell 80%" not in rendered
+        assert "CEO resigned" not in rendered
+        assert audit.is_clean and "34%" in rendered
+
+    def test_structured_answer_has_no_free_text_field(self):
+        from ragverify.schemas import StructuredAnswer
+
+        assert set(StructuredAnswer.model_fields) == {"claims"}, (
+            "any free-text field is a path to the reader that skips verification"
+        )
