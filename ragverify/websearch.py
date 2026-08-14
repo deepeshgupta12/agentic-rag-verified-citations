@@ -55,7 +55,12 @@ def _requests():
     return requests
 
 
-def search(query: str, settings: Settings, breaker: CircuitBreaker | None = None) -> list[WebResult]:
+def search(
+    query: str,
+    settings: Settings,
+    breaker: CircuitBreaker | None = None,
+    deadline: float | None = None,
+) -> list[WebResult]:
     """Query SearxNG instances in order, then fall back to DuckDuckGo.
 
     Returns an empty list rather than raising when everything fails, so a dead
@@ -69,6 +74,12 @@ def search(query: str, settings: Settings, breaker: CircuitBreaker | None = None
     minutes per web case doing exactly that.
     """
     for endpoint in settings.searx_endpoints:
+        # The run deadline bounds search too. Without it, a slow ladder of
+        # endpoints could consume the whole budget after the loop had already
+        # decided it could afford another round.
+        if deadline is not None and time.monotonic() >= deadline:
+            log.info("skipping search: run deadline passed")
+            return []
         if breaker is not None and breaker.is_open(endpoint):
             log.info("skipping %s: circuit open", endpoint)
             continue

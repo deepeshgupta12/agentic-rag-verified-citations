@@ -5,7 +5,7 @@
 [![CI](https://github.com/deepeshgupta12/agentic-rag-verified-citations/actions/workflows/ci.yml/badge.svg)](https://github.com/deepeshgupta12/agentic-rag-verified-citations/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-343%20passing-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-373%20passing-brightgreen)](tests/)
 
 *Agentic RAG · citation verification · NLI entailment · hallucination resistance · self-correcting retrieval · multi-hop*
 
@@ -220,7 +220,7 @@ Live evals run on manual dispatch, on PRs labelled `run-evals`, and weekly. The 
 
 ```bash
 pip install -e ".[dev]"
-pytest                    # 343 tests, no API key, no network
+pytest                    # 373 tests, no API key, no network
 ```
 
 Tests run against a scripted fake LLM that *subclasses the real client*, so retries, usage accounting and the structured-output path are exercised rather than stubbed.
@@ -264,6 +264,7 @@ Deeper notes in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Limitations
 
+- **The advanced stages are opt-in.** Entailment, reranking and multi-hop are off by default, so a stock configuration runs lexical grounding plus the answer audit. Enable them for higher assurance at roughly 2–4× latency.
 - **With entailment off (the default), grounding is recall-based.** "Most regions" cited for "all regions" still passes. Turn it on with `use_entailment=True` for the semantic check.
 - **Entailment is itself a model judgement** and can be wrong. It only ever *downgrades* — a claim rejected lexically is never revived — so enabling it cannot make the pipeline accept something it previously refused.
 - **Source authority is a coarse heuristic**: domain suffix plus a small known-domain table. An unrecognised domain scores neutral rather than bad, but a well-presented unreliable site scores the same as a good one.

@@ -116,6 +116,14 @@ class LLMClient:
         for attempt in range(self.settings.max_retries):
             if self.budget is not None:
                 self.budget.check()
+                # A fixed per-request timeout does not respect the run
+                # deadline: a call started with 5s left could still run for
+                # its full timeout and blow the cap.
+                remaining = self.budget.remaining_seconds
+                if remaining > 0:
+                    kwargs["timeout"] = min(
+                        kwargs.get("timeout", self.settings.request_timeout_s * 4), remaining
+                    )
             try:
                 response = self._client.chat.completions.create(**kwargs)
                 self._record(response, system + user)
@@ -154,6 +162,10 @@ class LLMClient:
                 calls=1,
             )
         )
+        self._sync_budget()
+
+    def _sync_budget(self) -> None:
+        """Mirror usage into the shared budget after every billed call."""
         if self.budget is not None:
             self.budget.calls = self.usage.calls
             self.budget.cost_usd = self.usage.cost_usd
@@ -230,8 +242,16 @@ class LLMClient:
             response = self._client.embeddings.create(model=self.settings.embed_model, input=batch)
             vectors.extend(item.embedding for item in response.data)
             usage = getattr(response, "usage", None)
-            if usage:
-                self.usage = self.usage.add(
-                    Usage(prompt_tokens=getattr(usage, "prompt_tokens", 0), calls=1)
+            prompt_tokens = getattr(usage, "prompt_tokens", 0) if usage else 0
+            # Embeddings are billed and were being counted as free, so a run
+            # that indexed a large corpus under-reported its own spend and
+            # could pass a cost cap it had already exceeded.
+            self.usage = self.usage.add(
+                Usage(
+                    prompt_tokens=prompt_tokens,
+                    cost_usd=estimate_cost(prompt_tokens, 0, self.settings.embed_price_per_million()),
+                    calls=1,
                 )
+            )
+            self._sync_budget()
         return vectors

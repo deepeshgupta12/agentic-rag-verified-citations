@@ -359,3 +359,70 @@ class TestBudgetIsEnforcedPerCall:
         researcher.run(QUESTION)
 
         assert llm.budget is researcher.budget, "two counters means neither sees the whole run"
+
+
+class TestReleaseGateFailsClosed:
+    """Anything short of a clean audit must not ship as a verified answer.
+
+    Each of these shipped before: the fallback fired only below 50% verified,
+    uncited sentences were recorded but never failed, and the prose audit
+    accepted a sentence when ANY of its citations supported it.
+    """
+
+    def _run(self, synthesis, **kw):
+        cfg = settings(max_rounds=1, **kw)
+        llm = FakeLLM(cfg, [
+            triage(), GOOD_DRAFT, verdict(Verdict.SUFFICIENT, NextAction.ANSWER),
+            synthesis, synthesis,
+        ])
+        return AdaptiveResearcher(cfg, llm, corpus_for(cfg)).run(QUESTION)
+
+    def test_fabricated_citation_at_exactly_fifty_percent(self):
+        """The boundary case: rate >= 0.5 skipped the fallback entirely."""
+        result = self._run(
+            "European revenue grew 34% year over year [S1].\n"
+            "The CEO resigned in October [S99]."
+        )
+        assert "CEO resigned" not in result.final_answer
+        assert "S99" not in result.final_answer
+        assert result.outcome is Outcome.PARTIAL, "a degraded run must not read as fully answered"
+
+    def test_uncited_assertion_does_not_pass_as_clean(self):
+        """Uncited text was reported but never failed."""
+        result = self._run(
+            "European revenue grew 34% year over year [S1].\n"
+            "The CEO resigned in October and left the company entirely."
+        )
+        assert "CEO resigned" not in result.final_answer
+
+    def test_irrelevant_citation_is_caught_in_the_answer(self):
+        """Per-citation, not per-sentence — the prose audit used any()."""
+        from ragverify.grounding import verify_answer
+        from ragverify.schemas import EvidenceItem, Route
+
+        ev = [
+            EvidenceItem(source_id="S1", label="a",
+                         text="European revenue grew 34% year over year.", origin=Route.LOCAL),
+            EvidenceItem(source_id="S2", label="b",
+                         text="The cafeteria menu changes on Fridays.", origin=Route.LOCAL),
+        ]
+        audit = verify_answer("European revenue grew 34% year over year [S1][S2].", ev)
+
+        assert audit.unsupported_citations == ["S2"]
+        assert not audit.is_clean
+
+    def test_clean_answer_still_ships_unchanged(self):
+        """The gate must not reject correct answers."""
+        result = self._run("European revenue grew 34% year over year [S1].")
+        assert result.outcome is Outcome.ANSWERED
+        assert result.answer_audit.is_clean
+        assert "34%" in result.final_answer
+
+    def test_headings_and_disclosures_do_not_fail_the_gate(self):
+        result = self._run(
+            "## Summary\n"
+            "European revenue grew 34% year over year [S1].\n"
+            "The 2027 forecast is not provided in the sources [S1]."
+        )
+        assert result.outcome is Outcome.ANSWERED
+        assert result.answer_audit.is_clean

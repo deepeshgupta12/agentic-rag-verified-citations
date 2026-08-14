@@ -484,6 +484,17 @@ class AdaptiveResearcher:
             outcome = Outcome.BUDGET
         elif stopped_early and rounds:
             outcome = Outcome.PARTIAL
+        elif audit is not None and not audit.is_clean:
+            # Something in the delivered text did not verify. Reporting
+            # ANSWERED would tell a caller branching on `is_answer` that
+            # everything checked out.
+            outcome = Outcome.PARTIAL
+        elif self.synthesis_degraded:
+            # The delivered text IS clean -- it is a deterministic rendering
+            # of verified claims -- but generation failed verification twice
+            # to get here. The caller should know the prose answer was
+            # discarded rather than merely graded down.
+            outcome = Outcome.PARTIAL
         else:
             outcome = Outcome.ANSWERED
 
@@ -853,12 +864,19 @@ class AdaptiveResearcher:
         results: list[WebResult] = []
         seen: set[str] = set()
         for q in queries:
-            for result in websearch.search(q, self.settings, self.breaker):
+            for result in websearch.search(
+                q, self.settings, self.breaker, deadline=self.budget.deadline
+            ):
                 if result.url not in seen:
                     seen.add(result.url)
                     results.append(result)
             if len(results) >= self.settings.web_max_results:
                 break
+
+        # Search and fetch are external calls: they cost time and can fail,
+        # so a cap that counts only model calls understates what a round
+        # actually spends.
+        self.budget.record(calls=len(queries))
 
         if not results:
             self._warn("Web search returned no results (all backends failed or empty).", round_index)
@@ -872,6 +890,7 @@ class AdaptiveResearcher:
             results, self.settings, breaker=self.breaker,
             deadline=self.budget.deadline, report=fetch_report,
         )
+        self.budget.record(calls=len(fetch_report))
         truncated = [r for r in fetch_report if r.get("truncated")]
         if truncated:
             worst = min(r["kept"] / r["total"] for r in truncated)
@@ -1107,17 +1126,30 @@ class AdaptiveResearcher:
                 )
             prompt = agents.resynthesis_prompt(prompt, audit)
 
-        if audit is not None and (
-            (audit.total_cited and audit.verified_rate < 0.5)
-            or (not audit.cited_sentences and grounding.supported)
-        ):
+        # Fail closed. Previously the fallback fired only below 50% verified,
+        # so an answer at exactly 50% with a fabricated citation shipped as
+        # `answered` with reduced confidence -- which contradicts the
+        # guarantee, because a low-confidence answer is still an answer and
+        # the reader cannot tell which sentence was the unverified one.
+        # Anything short of a clean audit is now rendered deterministically.
+        if audit is not None and not audit.is_clean and grounding.supported:
             # Two attempts produced text the evidence does not support. Falling
             # back to a deterministic rendering of the verified claims is the
             # only option that keeps the guarantee intact.
+            reasons = []
+            if audit.unverified_sentences:
+                reasons.append(f"{len(audit.unverified_sentences)} unverified sentence(s)")
+            if audit.fabricated_citations:
+                reasons.append(f"fabricated citations {audit.fabricated_citations}")
+            if audit.unsupported_citations:
+                reasons.append(f"unsupported citations {audit.unsupported_citations}")
+            if audit.factual_uncited:
+                reasons.append(f"{len(audit.factual_uncited)} uncited assertion(s)")
+            if not audit.cited_sentences:
+                reasons.append("no citations emitted")
             self._warn(
-                "Synthesis could not be verified after 2 attempts "
-                + (f"({audit.verified_rate:.0%} supported)" if audit.total_cited else "(no citations emitted)")
-                + "; rendering verified claims instead."
+                "Synthesis could not be verified after 2 attempts ("
+                + "; ".join(reasons) + "); rendering verified claims instead."
             )
             self.synthesis_degraded = True
             answer = self._render_claims(grounding)

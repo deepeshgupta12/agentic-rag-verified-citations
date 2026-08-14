@@ -22,6 +22,12 @@ MODEL_PRICING: dict[str, tuple[float, float]] = {
     "gpt-4.1": (2.00, 8.00),
     "gpt-4o-mini": (0.15, 0.60),
     "gpt-4o": (2.50, 10.00),
+    # Embedding models: output price is zero, but input is not, and a large
+    # corpus is mostly embedding tokens. Costing them at zero made the meter
+    # under-report every run that indexed anything.
+    "text-embedding-3-small": (0.02, 0.0),
+    "text-embedding-3-large": (0.13, 0.0),
+    "text-embedding-ada-002": (0.10, 0.0),
 }
 
 DEFAULT_MODEL = "gpt-5-mini"
@@ -214,6 +220,10 @@ class Settings:
     def price_per_million(self) -> tuple[float, float] | None:
         """(input, output) price, or None when the model is unpriced."""
         return MODEL_PRICING.get(self.model)
+
+    def embed_price_per_million(self) -> tuple[float, float] | None:
+        """Price for the embedding model, which is billed separately."""
+        return MODEL_PRICING.get(self.embed_model)
 
     def supports_temperature(self) -> bool:
         """Reasoning models reject an explicit ``temperature``.

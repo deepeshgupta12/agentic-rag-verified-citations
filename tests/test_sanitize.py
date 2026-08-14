@@ -162,7 +162,18 @@ class TestSSRF:
         with pytest.raises(UnsafeURL):
             _assert_safe_url(url)
 
-    def test_public_url_allowed(self):
+    def test_public_url_allowed(self, monkeypatch):
+        """Resolution is stubbed: the suite must not need DNS.
+
+        This test called getaddrinfo on a real hostname, so it failed in a
+        sandbox with no resolver and made the "no network" claim untrue.
+        """
+        import socket
+
+        monkeypatch.setattr(
+            socket, "getaddrinfo",
+            lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 443))],
+        )
         from ragverify.websearch import _assert_safe_url
 
         _assert_safe_url("https://example.com/article")  # must not raise

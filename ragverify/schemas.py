@@ -218,6 +218,10 @@ class AnswerAudit(BaseModel):
     # than counted as failures.
     disclosure_sentences: list[str] = Field(default_factory=list)
     fabricated_citations: list[str] = Field(default_factory=list)
+    # Citations resolving to a real passage that does not support the sentence
+    # they were attached to. Displayed to a reader as evidence for a statement
+    # they do not carry.
+    unsupported_citations: list[str] = Field(default_factory=list)
 
     @property
     def total_cited(self) -> int:
@@ -247,19 +251,51 @@ class AnswerAudit(BaseModel):
 
     @property
     def is_clean(self) -> bool:
-        """Nothing failed AND something was actually checked.
+        """Fail closed: everything displayed must be verified.
 
-        An answer citing nothing is trivially free of failures, so treating
-        that as clean would let the least verifiable output pass the
-        strictest gate. Disclosures count as citing: they carry a source and
-        are exactly what an honest answer to an unanswerable question looks
-        like.
+        Four conditions, because each was a way for unverified text to reach
+        the reader while the audit reported success:
+
+        * No unverified sentence.
+        * No fabricated citation -- a source that was never retrieved.
+        * No unsupported citation -- a real passage attached to a sentence it
+          does not carry. Displayed to the reader as evidence either way.
+        * No uncited factual assertion. Uncited text was reported but not
+          failed, so "The CEO resigned in October." with no citation passed at
+          100% verified. Headings and transitions are excluded by
+          ``factual_uncited``; a sentence making a claim is not.
+
+        A run may only report ``answered`` when this holds. Reduced confidence
+        is not a substitute -- a low-confidence answer is still an answer, and
+        the reader has no way to tell which sentence was the unverified one.
         """
         return (
             not self.unverified_sentences
             and not self.fabricated_citations
+            and not self.unsupported_citations
+            and not self.factual_uncited
             and self.cited_sentences > 0
         )
+
+    @property
+    def factual_uncited(self) -> list[str]:
+        """Uncited sentences that assert something, excluding scaffolding.
+
+        Headings, list labels and section markers legitimately carry no
+        citation. A sentence with a verb and content words does not: it is an
+        assertion the reader will believe, standing next to cited ones.
+        """
+        out = []
+        for sentence in self.uncited_sentences:
+            text = sentence.strip().lstrip("-*# ").strip()
+            words = text.split()
+            # Scaffolding is short and has no sentence structure.
+            if len(words) < 6 or text.endswith(":"):
+                continue
+            if not text[:1].isupper() and not text[:1].isdigit():
+                continue
+            out.append(sentence)
+        return out
 
 
 class RoundRecord(BaseModel):

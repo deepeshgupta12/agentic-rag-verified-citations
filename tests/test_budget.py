@@ -325,3 +325,64 @@ class TestTruncationIsReported:
         from ragverify.config import Settings
 
         assert Settings().fetch_max_chars == 20_000
+
+
+class TestBudgetCoversEveryExternalCall:
+    """A cap that counts only chat calls understates what a round spends."""
+
+    def test_embeddings_are_priced(self):
+        from ragverify.config import Settings
+
+        assert Settings().embed_price_per_million() is not None, (
+            "costing embeddings at zero under-reports any run that indexes a corpus"
+        )
+
+    def test_embeddings_charge_the_budget(self):
+        from ragverify.config import Settings
+        from ragverify.llm import LLMClient
+
+        class FakeEmbeddings:
+            def create(self, model, input):
+                return type("R", (), {
+                    "data": [type("E", (), {"embedding": [0.1, 0.2]})() for _ in input],
+                    "usage": type("U", (), {"prompt_tokens": 5000})(),
+                })()
+
+        client = LLMClient.__new__(LLMClient)
+        client.settings = Settings(api_key="k")
+        client.usage = __import__("ragverify.schemas", fromlist=["Usage"]).Usage()
+        client.budget = Budget(max_calls=10, max_cost_usd=1.0)
+        client._client = type("C", (), {"embeddings": FakeEmbeddings()})()
+
+        client.embed(["alpha", "beta"])
+
+        assert client.budget.calls == 1, "an embedding call must count against the cap"
+        assert client.budget.cost_usd > 0, "an embedding call must count against the cost"
+
+    def test_embedding_respects_the_call_cap(self):
+        from ragverify.config import Settings
+        from ragverify.llm import LLMClient
+
+        client = LLMClient.__new__(LLMClient)
+        client.settings = Settings(api_key="k")
+        client.usage = __import__("ragverify.schemas", fromlist=["Usage"]).Usage()
+        client.budget = Budget(max_calls=1)
+        client.budget.record(calls=1)
+        client._client = None
+
+        with pytest.raises(BudgetExceeded):
+            client.embed(["alpha"])
+
+    def test_search_honours_the_run_deadline(self, monkeypatch):
+        import time
+
+        from ragverify import websearch
+        from ragverify.config import Settings
+
+        attempted = []
+        monkeypatch.setattr(
+            websearch, "_searxng",
+            lambda q, e, s: attempted.append(e) or [],
+        )
+        websearch.search("q", Settings(), deadline=time.monotonic() - 1)
+        assert not attempted, "a passed deadline must stop the search ladder"

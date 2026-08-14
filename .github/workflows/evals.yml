@@ -69,24 +69,27 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
+          # Not swallowed. `|| echo` previously turned a failing eval into a
+          # green job, which is worse than having no gate at all: it reports
+          # that quality was checked when nothing was enforced.
           python evals/run_eval.py \
             --out results.json \
             --model "${{ inputs.model || 'gpt-5-mini' }}" \
-            ${{ inputs.filter && format('--filter {0}', inputs.filter) || '' }} \
-          || echo "EVAL_EXIT=$?" >> "$GITHUB_ENV"
+            ${{ inputs.filter && format('--filter {0}', inputs.filter) || '' }}
 
       - name: Compare against the committed baseline
         if: steps.key.outputs.present == 'true'
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          if [ -f baseline.json ]; then
-            # `--compare` exits non-zero on regression; that is the gate.
-            python evals/run_eval.py --baseline baseline.json --compare --out /dev/null \
-              < /dev/null || exit 1
-          else
-            echo "::notice::No baseline.json committed; nothing to compare against."
+          if [ ! -f baseline.json ]; then
+            # A missing baseline is a broken gate, not a neutral condition:
+            # there is nothing to compare against, so every result passes.
+            echo "::error::baseline.json is missing; the regression gate cannot run."
+            exit 1
           fi
+          # `--compare` exits non-zero on regression; that is the gate.
+          python evals/run_eval.py --baseline baseline.json --compare --out /dev/null
 
       - name: Summarise
         if: always() && steps.key.outputs.present == 'true'

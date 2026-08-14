@@ -211,6 +211,7 @@ def verify_answer(
     uncited: list[str] = []
     disclosures: list[str] = []
     fabricated: list[str] = []
+    unsupported_cites: list[str] = []
 
     for raw in _SENTENCE.split(answer):
         sentence = raw.strip()
@@ -249,7 +250,20 @@ def verify_answer(
             disclosures.append(sentence)
             continue
 
-        if resolved and any(claim_support(prose, item.text, threshold)[0] for item in resolved):
+        # Per citation, not per sentence. Accepting a sentence because ANY of
+        # its citations supports it lets an unrelated source ride along on a
+        # good one and still be displayed to the reader as evidence for that
+        # statement -- the same defect fixed for structured claims, which the
+        # prose audit still had.
+        supporting = [
+            item for item in resolved
+            if claim_support(prose, item.text, threshold)[0]
+        ]
+        for item in resolved:
+            if item not in supporting:
+                unsupported_cites.append(item.source_id)
+
+        if supporting:
             verified.append(sentence)
         else:
             unverified.append(sentence)
@@ -260,6 +274,7 @@ def verify_answer(
         uncited_sentences=uncited,
         disclosure_sentences=disclosures,
         fabricated_citations=sorted(set(fabricated)),
+        unsupported_citations=sorted(set(unsupported_cites)),
     )
 
 
