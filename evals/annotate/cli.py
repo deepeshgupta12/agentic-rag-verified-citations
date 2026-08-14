@@ -106,26 +106,52 @@ def cmd_extract(args: argparse.Namespace) -> int:
                     for cid in claim.citations or ["(none)"]:
                         by_id[(claim.text, cid)] = verdict
 
-        sources = {e.source_id: e for e in run.citations}
+        # Every passage the run SAW, not only those a surviving claim cited.
+        # `run.citations` returns sources cited by supported claims alone, so
+        # using it silently drops every rejected pair -- leaving precision
+        # measurable and recall not, which is the opposite of the intent
+        # stated above. The ledger records each passage as it was used.
+        sources: dict[str, dict] = {}
+        for record in run.ledger.get("evidence", []):
+            sources[record["source_id"]] = record
+
         for (claim_text, cid), verdict in by_id.items():
-            source = sources.get(cid)
-            if source is None:
+            record = sources.get(cid)
+            if record is None:
                 continue
-            item_id = AnnotationItem.make_id(claim_text, cid, source.text)
+            source_text = record.get("sanitized_text") or record.get("raw_text") or ""
+            source_label = record.get("label", cid)
+            if not source_text:
+                continue
+            item_id = AnnotationItem.make_id(claim_text, cid, source_text)
             if item_id in existing:
                 continue
             existing.add(item_id)
             items.append(AnnotationItem(
                 item_id=item_id, question=question, claim=claim_text,
-                source_id=cid, source_label=source.label, source_text=source.text,
+                source_id=cid, source_label=source_label, source_text=source_text,
                 pipeline_verdict=verdict,
             ))
 
     _write(ITEMS, items)
+    accepted = sum(i.pipeline_verdict == "accepted" for i in items)
+    rejected = len(items) - accepted
     print(f"\n{len(items)} item(s) in {ITEMS}", file=sys.stderr)
+    print(f"  {accepted} accepted, {rejected} rejected by the pipeline", file=sys.stderr)
+
     if len(items) < 300:
         print(
             f"note: {len(items)} pairs is below the ~300-500 needed for a stable kappa.",
+            file=sys.stderr,
+        )
+    # Recall is measured over the pairs the pipeline THREW AWAY. Without a
+    # reasonable number of them, the score can only report precision, and a
+    # precision-only number flatters a system tuned to refuse.
+    if rejected < max(20, len(items) // 10):
+        print(
+            f"warning: only {rejected} rejected pair(s). Recall is measured over "
+            "citations the pipeline discarded, so it cannot be estimated from this "
+            "set. Add questions the corpus answers poorly to produce more.",
             file=sys.stderr,
         )
     return 0
