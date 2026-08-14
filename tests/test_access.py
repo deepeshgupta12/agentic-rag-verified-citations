@@ -157,8 +157,14 @@ class TestAuditLog:
 
         sys.path.insert(0, "tests")
         from test_orchestrator import (
-            CITED_ANSWER, GOOD_DRAFT, QUESTION, FakeLLM,
-            corpus_for, settings, triage, verdict,
+            CITED_ANSWER,
+            GOOD_DRAFT,
+            QUESTION,
+            FakeLLM,
+            corpus_for,
+            settings,
+            triage,
+            verdict,
         )
 
         from ragverify.audit import record_run
