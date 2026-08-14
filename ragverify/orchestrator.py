@@ -35,6 +35,7 @@ import time
 from collections.abc import Callable, Sequence
 
 from . import agents, sanitize, sourcequality, telemetry, websearch
+from . import contradiction as contradiction_mod
 from . import coverage as coverage_mod
 from . import entailment as entailment_mod
 from . import grounding as grounding_mod
@@ -233,6 +234,8 @@ class AdaptiveResearcher:
         # Evidence gathered by multi-hop, merged into the main loop so the
         # answer is written over everything the hops found.
         self._hop_evidence: list[EvidenceItem] = []
+        # Cross-source disagreements found this run.
+        self.contradictions: list = []
         # Append-only audit trail. Built during the run so it captures each
         # passage as it was actually used, including the pre-sanitisation body.
         self.ledger: EvidenceLedger | None = None
@@ -359,6 +362,22 @@ class AdaptiveResearcher:
                     self._warn(note, index)
                     for det in detections:
                         flags_by_id.setdefault(det.source_id, []).append(det.kind)
+
+            # Sources are compared against each OTHER here. Every other check
+            # in the pipeline compares a claim to its own citation, so a
+            # corpus that disagrees with itself passes all of them.
+            if settings.detect_contradictions:
+                conflicts = contradiction_mod.detect(
+                    evidence, min_overlap=settings.contradiction_min_overlap
+                )
+                if conflicts:
+                    self.contradictions = conflicts
+                    self._warn(contradiction_mod.summarize(conflicts), index)
+                    for conflict in conflicts[:3]:
+                        self.tracer.emit(
+                            EventKind.WARNING, conflict.describe(), index,
+                            data={"kind": conflict.kind},
+                        )
 
             # Rank web evidence by publisher class, recency and cross-domain
             # corroboration before it reaches the drafting prompt, so the
@@ -518,6 +537,14 @@ class AdaptiveResearcher:
             answer_audit=audit,
             ledger=self.ledger.to_dict(include_text=False),
             plan=plan_report.model_dump(mode="json") if plan_report.planned else {},
+            contradictions=[
+                {
+                    "kind": c.kind, "sources": [c.source_a, c.source_b],
+                    "value_type": c.value_type, "a": c.value_a, "b": c.value_b,
+                    "description": c.describe(), "overlap": c.overlap,
+                }
+                for c in self.contradictions
+            ],
             source_quality=(
                 {
                     "mean_authority": self.quality.mean_authority,
@@ -1088,7 +1115,9 @@ class AdaptiveResearcher:
 
         self.tracer.emit(EventKind.SYNTHESIZE, "Writing final answer")
         prompt = agents.synthesis_prompt(
-            question, grounding, evidence, verifier, self.settings.evidence_token_budget
+            question, grounding, evidence, verifier,
+            self.settings.evidence_token_budget,
+            contradictions=contradiction_mod.as_prompt_block(self.contradictions),
         )
 
         answer = ""

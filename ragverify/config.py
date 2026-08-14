@@ -173,6 +173,14 @@ class Settings:
     # classification was a way for unverified text to reach the reader.
     structured_synthesis: bool = True
 
+    # Deterministic cross-source contradiction detection. Grounding checks a
+    # claim against its own citation and entailment does the same
+    # semantically; neither ever compares one source against another, so a
+    # corpus holding "revenue was 2.1bn" and "revenue was 1.6bn" yields a
+    # fully verified answer built on whichever ranked first.
+    detect_contradictions: bool = True
+    contradiction_min_overlap: float = 0.22
+
     # --- safety ----------------------------------------------------------
     # Neutralize model-directed instructions found in retrieved text. Uploaded
     # files and fetched pages are attacker-controllable input.

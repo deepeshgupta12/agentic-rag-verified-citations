@@ -418,6 +418,11 @@ class ResearchResult(BaseModel):
     # question was single-hop. Per-hop rather than aggregate: one mean hides
     # the case where the decisive sub-question is the unanswered one.
     plan: dict[str, Any] = Field(default_factory=dict)
+    # Cross-source disagreements found mechanically. Reported, never resolved:
+    # deciding which source is right needs recency, authority and domain rules
+    # that vary by corpus, and a silently chosen side is indistinguishable
+    # from a verified fact.
+    contradictions: list[dict[str, Any]] = Field(default_factory=list)
     budget: dict[str, float] = Field(default_factory=dict)
     elapsed_s: float = 0.0
 

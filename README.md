@@ -5,7 +5,7 @@
 [![CI](https://github.com/deepeshgupta12/agentic-rag-verified-citations/actions/workflows/ci.yml/badge.svg)](https://github.com/deepeshgupta12/agentic-rag-verified-citations/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-379%20passing-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-397%20passing-brightgreen)](tests/)
 
 *Agentic RAG · citation verification · NLI entailment · hallucination resistance · self-correcting retrieval · multi-hop*
 
@@ -141,6 +141,13 @@ Stable chunk ids, page numbers, URLs. Web results are fetched and extracted, not
 
 The ledger records a content hash and snapshot of every passage **both before and after sanitisation** — grounding checks the sanitised text, so an audit needs both — plus one claim→source edge per citation carrying its verdict: `supported`, `dropped` (real passage, does not support) or `fabricated` (never retrieved). Only the last is a hallucination, and a flat list of surviving ids collapses all three into one.
 
+### Sources are checked against each other
+Grounding compares a claim to its own citation, and entailment does the same semantically. Neither ever compares one source against another — so a corpus containing "revenue was 2.1bn" and "revenue was 1.6bn" yields a fully verified answer built on whichever passage ranked first.
+
+Conflicting values are found mechanically: two passages about the same subject asserting different figures of the same type, compared canonically so `2.1 billion euro` and `EUR 2,100,000,000` agree while `2.1bn` and `1.6bn` do not, and a percentage is never compared against a headcount. Polarity conflicts — one source asserting what another denies — are caught too. Detected conflicts are surfaced to the synthesizer with instructions to attribute rather than resolve, and reported on the result.
+
+Precision is preferred to recall: a false contradiction discredits every real one, so passages that are merely adjacent in subject are not compared at all.
+
 ### Every displayed citation is checked independently
 A claim citing `[S1][S2]` keeps only the sources that actually carry it — accepting it because *any* citation supports it would show the reader an unrelated document as evidence. This holds for the research draft and for the final answer, which were separate code paths and had to be fixed separately.
 
@@ -175,6 +182,7 @@ Every external call — LLM, embedding, search, fetch — is metered against one
 | `rerank_method` | `none` | `llm` or `cross-encoder` |
 | `use_multi_hop` | `False` | Chained retrieval for genuinely sequential questions |
 | `assess_source_quality` | `True` | Rank and warn on web evidence |
+| `detect_contradictions` | `True` | Find cross-source disagreements mechanically |
 | `cache_embeddings` | `True` | Content-hash cache — **146× faster** on a warm corpus |
 | `sanitize_sources` | `True` | Neutralise injections in retrieved text |
 | `max_cost_usd` / `max_seconds` / `max_calls` | 1.00 / 180 / 40 | Hard caps, per run |
@@ -240,7 +248,7 @@ Live evals run on manual dispatch, on PRs labelled `run-evals`, and weekly. The 
 
 ```bash
 pip install -e ".[dev]"
-pytest                    # 379 tests, no API key, no network
+pytest                    # 397 tests, no API key, no network
 ```
 
 Tests run against a scripted fake LLM that *subclasses the real client*, so retries, usage accounting and the structured-output path are exercised rather than stubbed.
@@ -260,6 +268,7 @@ ragverify/
 ├── planner.py        multi-hop DAG, per-sub-question coverage
 ├── rerank.py         cross-encoder / LLM reranking
 ├── sourcequality.py  authority, freshness, diversity, corroboration
+├── contradiction.py  cross-source value and polarity conflicts
 ├── retrieval.py      BM25 + dense + RRF + MMR
 ├── sanitize.py       untrusted-source boundary
 ├── budget.py         caps, deadline, circuit breaker
@@ -289,7 +298,7 @@ Deeper notes in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 - **With entailment off (the default), grounding is recall-based.** "Most regions" cited for "all regions" still passes. Turn it on with `use_entailment=True` for the semantic check.
 - **Entailment is itself a model judgement** and can be wrong. It only ever *downgrades* — a claim rejected lexically is never revived — so enabling it cannot make the pipeline accept something it previously refused.
 - **Source scoring combines four signals; authority itself is coarse.** Freshness, domain diversity and cross-domain corroboration are measured, but *authority* is a domain-suffix and known-domain table, so an unrecognised domain and a well-presented unreliable one score the same neutral value. It applies to **web sources only** — uploaded documents are not scored, since the user chose them.
-- **Cross-source contradictions are neither deterministically detected nor adjudicated.** The synthesizer is instructed to surface conflicting claims, but reporting both sides is not guaranteed — there is no contradiction detector, and entailment only checks a claim against its own citation, never one source against another.
+- **Contradictions are detected but not adjudicated.** Conflicting figures and polarity between sources are found mechanically and reported; the pipeline does not decide which source is right. Deciding needs recency, authority and domain rules that vary by corpus, and a silently chosen side is indistinguishable from a verified fact. Detection is precision-biased, so subtle or purely semantic disagreements are missed.
 - **Multi-hop planning is opt-in and imperfect.** The planner sometimes judges a question single-hop when chaining would have helped.
 - **SSRF protection resolves addresses at validation time.** Every redirect hop is re-checked, but DNS rebinding — the address changing between check and connection — needs connection-time pinning, which this does not do.
 - **Fetched web pages are truncated at `fetch_max_chars`** (uploaded documents are not; a separate 5 MB cap bounds the HTTP body). A specification cut at the cap loses whole sections while the remaining text still reads coherently, so a question about a missing section gets a truthful "the sources do not state this" about a document that does. Truncation is warned about rather than silent — raise the setting for standards or regulatory corpora.
@@ -298,10 +307,9 @@ Deeper notes in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 ## Roadmap
 
 - Human-labelled groundedness set with inter-annotator agreement
-- Contradiction *resolution* rather than disclosure
+- Contradiction **resolution** — recency, authority and domain rules on top of the existing detector
 - Table-aware chunking with cell-level provenance
 - Streaming answers with incremental verification
-- Connection-time DNS pinning to close rebinding
 
 ## License
 

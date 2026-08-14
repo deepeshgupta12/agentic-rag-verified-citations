@@ -124,6 +124,8 @@ Rules:
   "the sources do not give a 2027 forecast", not "there is no 2027 forecast".
   A disclosure is a statement about the evidence, not a fact about the world.
 - Never restate a claim that failed verification.
+- When sources are listed as contradicting, do NOT pick one. Attribute each
+  figure to its source, or make a disclosure claim that they conflict.
 
 A short, fully supported answer is the correct outcome. Claims that cannot be
 supported belong in `disclosure` or nowhere."""
@@ -306,6 +308,7 @@ def synthesis_prompt(
     evidence: Sequence[EvidenceItem],
     verifier: VerifierReport,
     token_budget: int,
+    contradictions: str = "",
 ) -> str:
     supported = "\n".join(f"- {c.text}  {c.citations}" for c in grounding.supported) or "- (none)"
     unsupported = "\n".join(f"- {c.text}" for c in grounding.unsupported) or "- (none)"
@@ -324,6 +327,8 @@ Remaining gaps to disclose:
 {gaps}
 
 Verifier verdict: {verifier.verdict.value}
+
+{contradictions}
 
 Source passages for reference:
 
