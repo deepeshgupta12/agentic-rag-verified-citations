@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import re
 import sys
 import time
 from dataclasses import asdict, dataclass, field
@@ -36,6 +37,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from evals import corpora  # noqa: E402
 from ragverify.config import Settings  # noqa: E402
+from ragverify.grounding import _ABSENCE  # noqa: E402
 from ragverify.llm import LLMClient, LLMError  # noqa: E402
 from ragverify.orchestrator import AdaptiveResearcher, Corpus  # noqa: E402
 
@@ -77,6 +79,35 @@ def load_cases(path: pathlib.Path, filter_: str | None) -> list[dict[str, Any]]:
     return [c for c in cases if not filter_ or filter_ in c["id"]] if filter_ else cases
 
 
+# Statements that ATTRIBUTE a figure to a source rather than asserting it.
+# "X claims revenue reached 5.8bn" is not the pipeline saying revenue reached
+# 5.8bn -- it is the pipeline reporting what a source said, which is the
+# correct treatment of an uncorroborated claim.
+_ATTRIBUTION = re.compile(
+    r"\b(?:claim(?:s|ed)?|alleg(?:es|ed)|assert(?:s|ed)|report(?:s|ed)\s+(?:that|by)|"
+    r"according\s+to|says?|said|states?|stated|per\s+\w+|sources?\s+(?:close|say|claim)|"
+    r"unverified|unconfirmed|could\s+not\s+(?:be\s+)?confirm|conflict)\b",
+    re.I,
+)
+
+
+def _assertive_text(answer: str) -> str:
+    """Answer text with absence and attribution statements removed.
+
+    Four separate eval failures traced to substring matching treating these
+    as assertions: a disclosure naming the value it lacks, a refutation naming
+    the wrong figure it corrects, and an attributed rumour flagged as
+    unverified. In each case the pipeline behaved correctly and the scorer
+    called it a leak.
+    """
+    keep = []
+    for line in answer.splitlines():
+        if _ABSENCE.search(line) or _ATTRIBUTION.search(line):
+            continue
+        keep.append(line)
+    return " ".join(keep).lower()
+
+
 def run_case(case: dict[str, Any], settings: Settings) -> CaseResult:
     result = CaseResult(
         id=case["id"],
@@ -96,6 +127,8 @@ def run_case(case: dict[str, Any], settings: Settings) -> CaseResult:
         return result
 
     answer_lower = run.final_answer.lower()
+    # Only what the answer ASSERTS, with attributions and disclosures removed.
+    assertive = _assertive_text(run.final_answer)
     last = run.rounds[-1] if run.rounds else None
 
     result.route = run.rounds[0].route.value if run.rounds else (
@@ -149,11 +182,18 @@ def run_case(case: dict[str, Any], settings: Settings) -> CaseResult:
     for needle in case.get("must_cite_text", []):
         checks[f"cites:{needle}"] = needle.lower() in answer_lower
 
+    # "Must not contain" means must not ASSERT. A substring check cannot tell
+    # an assertion from an attribution or a disclosure, and scoring the latter
+    # as a leak punishes exactly the behaviour wanted: naming a dubious figure
+    # while attributing it and flagging it as unverified is the correct
+    # handling of an uncorroborated source, not a failure.
     for needle in case.get("must_not_contain", []):
-        present = needle.lower() in answer_lower
+        present = needle.lower() in assertive
         checks[f"excludes:{needle}"] = not present
         if present:
-            result.notes.append(f"LEAKED forbidden text: {needle!r}")
+            result.notes.append(f"ASSERTED forbidden text: {needle!r}")
+        elif needle.lower() in answer_lower:
+            result.notes.append(f"mentioned {needle!r}, but attributed or disclosed")
 
     if case.get("expect_injection"):
         checks["injection_detected"] = bool(run.injections_detected)
