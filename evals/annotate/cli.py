@@ -92,7 +92,14 @@ def cmd_extract(args: argparse.Namespace) -> int:
 
     for n, question in enumerate(questions, start=1):
         print(f"[{n}/{len(questions)}] {question}", file=sys.stderr, flush=True)
-        run = AdaptiveResearcher(settings, client, corpus).run(question)
+        # The researcher is held rather than discarded because the ledger it
+        # owns still carries passage text. `result.ledger` is serialised with
+        # include_text=False, which is right for a result payload -- hashes
+        # prove which passage was used without copying document content into a
+        # shareable artifact -- and useless here, where the text is the thing
+        # a human has to read.
+        researcher = AdaptiveResearcher(settings, client, corpus)
+        run = researcher.run(question)
         if not run.rounds:
             continue
 
@@ -108,19 +115,22 @@ def cmd_extract(args: argparse.Namespace) -> int:
 
         # Every passage the run SAW, not only those a surviving claim cited.
         # `run.citations` returns sources cited by supported claims alone, so
-        # using it silently drops every rejected pair -- leaving precision
-        # measurable and recall not, which is the opposite of the intent
-        # stated above. The ledger records each passage as it was used.
-        sources: dict[str, dict] = {}
-        for record in run.ledger.get("evidence", []):
-            sources[record["source_id"]] = record
+        # using it drops every rejected pair -- leaving precision measurable
+        # and recall not, which is the opposite of the intent stated above.
+        sources = {}
+        ledger = getattr(researcher, "ledger", None)
+        if ledger is not None:
+            for record in ledger.records.values():
+                sources[record.source_id] = record
 
         for (claim_text, cid), verdict in by_id.items():
             record = sources.get(cid)
             if record is None:
                 continue
-            source_text = record.get("sanitized_text") or record.get("raw_text") or ""
-            source_label = record.get("label", cid)
+            # The sanitized text is what grounding actually checked against,
+            # so it is what a human should judge.
+            source_text = record.sanitized_text or record.raw_text or ""
+            source_label = getattr(record, "label", cid)
             if not source_text:
                 continue
             item_id = AnnotationItem.make_id(claim_text, cid, source_text)
