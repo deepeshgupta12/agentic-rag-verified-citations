@@ -163,6 +163,7 @@ Every external call — LLM, embedding, search, fetch — is metered against one
 | `cache_embeddings` | `True` | Content-hash cache — **146× faster** on a warm corpus |
 | `sanitize_sources` | `True` | Neutralise injections in retrieved text |
 | `max_cost_usd` / `max_seconds` / `max_calls` | 1.00 / 180 / 40 | Hard caps, per run |
+| `fetch_max_chars` | 20,000 | Characters kept per fetched page; truncation is reported |
 
 **Raise `max_seconds` when enabling the optional stages.** A single question
 with reranking and entailment takes roughly 110 seconds, so the 180-second
@@ -269,6 +270,7 @@ Deeper notes in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 - **Contradictions are surfaced, not adjudicated.** When two sources disagree, both are reported; the pipeline does not decide which is right.
 - **Multi-hop planning is opt-in and imperfect.** The planner sometimes judges a question single-hop when chaining would have helped.
 - **SSRF protection resolves addresses at validation time.** Every redirect hop is re-checked, but DNS rebinding — the address changing between check and connection — needs connection-time pinning, which this does not do.
+- **Long documents are truncated at `fetch_max_chars`.** A specification cut at the cap loses whole sections while the remaining text still reads coherently, so a question about a missing section gets a truthful "the sources do not state this" about a document that does. Truncation is now warned about rather than silent — raise the setting for standards or regulatory corpora.
 - **25 synthetic cases is a smoke test, not a benchmark.** There is no human-labelled groundedness set, and coverage thresholds are tuned on these fixtures. Re-tune them on your data.
 
 ## Roadmap

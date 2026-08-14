@@ -228,9 +228,10 @@ def _assert_safe_url(url: str) -> None:
 def fetch_page(
     url: str,
     settings: Settings,
-    max_chars: int = 20_000,
+    max_chars: int | None = None,
     breaker: CircuitBreaker | None = None,
     deadline: float | None = None,
+    report: list[dict] | None = None,
 ) -> str:
     """Fetch and extract readable text from ``url``. Empty string on failure.
 
@@ -304,7 +305,36 @@ def fetch_page(
             body = b"".join(chunks).decode(response.encoding or "utf-8", errors="replace")
             if breaker is not None:
                 breaker.record_success(host)
-            return _extract_text(body)[:max_chars]
+
+            extracted = _extract_text(body)
+            limit = settings.fetch_max_chars if max_chars is None else max_chars
+
+            # Truncation used to be silent. A long specification cut here loses
+            # whole sections while the remaining text still reads perfectly, so
+            # a question about a missing section gets a truthful "the sources
+            # do not state this" about a document that does. Nothing downstream
+            # can detect that, because by then the text is all there is.
+            if len(extracted) > limit:
+                log.warning(
+                    "truncated %s: kept %d of %d chars (%.0f%%)",
+                    current, limit, len(extracted), 100 * limit / len(extracted),
+                )
+                if report is not None:
+                    report.append({
+                        "url": current,
+                        "kept": limit,
+                        "total": len(extracted),
+                        "truncated": True,
+                    })
+                # Cut on a paragraph boundary where one is close, so the tail
+                # is not a fragment of a sentence.
+                cut = extracted.rfind("\n\n", int(limit * 0.9), limit)
+                return extracted[: cut if cut > 0 else limit]
+
+            if report is not None:
+                report.append({"url": current, "kept": len(extracted),
+                               "total": len(extracted), "truncated": False})
+            return extracted
 
         log.info("too many redirects for %s", url)
         return ""
@@ -387,6 +417,7 @@ def fetch_many(
     max_workers: int = 5,
     breaker: CircuitBreaker | None = None,
     deadline: float | None = None,
+    report: list[dict] | None = None,
 ) -> dict[str, str]:
     """Fetch the top ``limit`` results concurrently.
 
@@ -399,17 +430,17 @@ def fetch_many(
 
     pages: dict[str, str] = {}
     try:
-        _fetch_into(pages, targets, settings, max_workers, breaker, deadline)
+        _fetch_into(pages, targets, settings, max_workers, breaker, deadline, report)
     except concurrent.futures.TimeoutError:
         # Whatever arrived before the deadline is still usable evidence.
         log.info("fetch_many hit the deadline with %d page(s) retrieved", len(pages))
     return pages
 
 
-def _fetch_into(pages, targets, settings, max_workers, breaker, deadline) -> None:
+def _fetch_into(pages, targets, settings, max_workers, breaker, deadline, report=None) -> None:
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
-            pool.submit(fetch_page, r.url, settings, 20_000, breaker, deadline): r.url
+            pool.submit(fetch_page, r.url, settings, None, breaker, deadline, report): r.url
             for r in targets
         }
         overall = settings.request_timeout_s * 3

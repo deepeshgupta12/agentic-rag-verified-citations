@@ -257,3 +257,71 @@ class TestBudgetIsPerRun:
 
         assert client.budget is r2.budget, "the client must track the current run's budget"
         assert client.budget is not r1.budget
+
+
+class TestTruncationIsReported:
+    """Truncation used to be silent.
+
+    A long specification cut at the character cap loses whole sections while
+    the remaining text still reads perfectly, so a question about a missing
+    section gets a truthful "the sources do not state this" about a document
+    that does. Nothing downstream can detect it, because by then the truncated
+    text is all there is.
+    """
+
+    def _page(self, monkeypatch, body: str):
+        from ragverify import websearch
+
+        class Resp:
+            status_code, is_redirect, encoding = 200, False, "utf-8"
+            headers = {"Content-Type": "text/html"}
+
+            def raise_for_status(self): ...
+            def iter_content(self, n): yield body.encode()
+            def close(self): ...
+
+        monkeypatch.setattr(websearch, "_assert_safe_url", lambda u: None)
+        monkeypatch.setattr(websearch, "_requests", lambda: type("R", (), {"get": lambda *a, **k: Resp()}))
+
+    def test_truncation_is_recorded(self, monkeypatch):
+        from ragverify.config import Settings
+        from ragverify.websearch import fetch_page
+
+        self._page(monkeypatch, "<p>" + ("word " * 4000) + "</p>")
+        report: list[dict] = []
+        text = fetch_page("https://x.test/doc", Settings(fetch_max_chars=500), report=report)
+
+        assert len(text) <= 500
+        assert report and report[0]["truncated"] is True
+        assert report[0]["total"] > report[0]["kept"]
+
+    def test_short_page_is_not_flagged(self, monkeypatch):
+        from ragverify.config import Settings
+        from ragverify.websearch import fetch_page
+
+        self._page(monkeypatch, "<p>" + ("word " * 30) + "</p>")
+        report: list[dict] = []
+        fetch_page("https://x.test/doc", Settings(fetch_max_chars=20_000), report=report)
+
+        assert report and report[0]["truncated"] is False
+
+    def test_report_is_optional(self, monkeypatch):
+        """Default None must preserve the previous behaviour exactly."""
+        from ragverify.config import Settings
+        from ragverify.websearch import fetch_page
+
+        self._page(monkeypatch, "<p>" + ("word " * 4000) + "</p>")
+        assert fetch_page("https://x.test/doc", Settings(fetch_max_chars=500))
+
+    def test_explicit_max_chars_still_honoured(self, monkeypatch):
+        """The old positional argument keeps working."""
+        from ragverify.config import Settings
+        from ragverify.websearch import fetch_page
+
+        self._page(monkeypatch, "<p>" + ("word " * 4000) + "</p>")
+        assert len(fetch_page("https://x.test/doc", Settings(), 300)) <= 300
+
+    def test_setting_default_matches_previous_hardcoded_value(self):
+        from ragverify.config import Settings
+
+        assert Settings().fetch_max_chars == 20_000

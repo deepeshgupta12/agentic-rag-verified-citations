@@ -173,6 +173,11 @@ class Settings:
     web_enabled: bool = True
     searx_endpoints: tuple[str, ...] = DEFAULT_SEARX_ENDPOINTS
     web_max_results: int = 8
+    # Characters kept from a fetched page. Long specifications exceed this by
+    # a wide margin -- an RFC truncated here loses whole sections, and the
+    # remaining text still reads coherently, so the loss is invisible. Raise
+    # it for standards or regulatory corpora. Truncation is now reported.
+    fetch_max_chars: int = 20_000
     request_timeout_s: float = 12.0
     max_retries: int = 3
 

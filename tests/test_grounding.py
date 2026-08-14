@@ -316,3 +316,48 @@ class TestValueNormalization:
 
         assert unsupported_values("Q3 revenue", "Q4 revenue")
         assert not unsupported_values("Q3 revenue", "Q3 earnings")
+
+    @pytest.mark.parametrize(
+        "claim,source",
+        [
+            # Digits and words are the same fact. The asymmetry mattered: a
+            # claim written "4 bytes" failed against a source saying "four
+            # bytes", while the reverse passed, so strictness depended on
+            # typography. Found on a real Wikipedia page.
+            ("occupies 4 bytes", "occupies four bytes"),
+            ("grew by 3 percent", "grew by three percent"),
+            ("grew by 3%", "three percent growth was recorded"),
+            ("4 billion in revenue", "four billion in revenue"),
+            ("20 million maximum", "twenty million maximum"),
+        ],
+    )
+    def test_word_numbers_match_digits(self, claim, source):
+        from ragverify.normalize import unsupported_values
+
+        assert not unsupported_values(claim, source)
+
+    @pytest.mark.parametrize(
+        "claim,source",
+        [
+            ("4 bytes", "five bytes"),
+            ("grew 5 percent", "grew three percent"),
+            ("412 staff", "380 staff"),
+        ],
+    )
+    def test_word_numbers_still_reject_mismatches(self, claim, source):
+        from ragverify.normalize import unsupported_values
+
+        assert unsupported_values(claim, source)
+
+    def test_word_numbers_add_no_claim_obligation(self):
+        """Source-side only, deliberately.
+
+        Widening what a claim *requires* would make "one of the segments"
+        demand the digit 1, so a source saying "a segment" would newly fail --
+        inventing rejections from ordinary prose, since these words are far
+        more often articles and pronouns than quantities.
+        """
+        from ragverify.normalize import value_requirements
+
+        assert value_requirements("one of the segments improved") == []
+        assert not value_requirements("no one expected that")

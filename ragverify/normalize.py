@@ -275,9 +275,67 @@ def canonical_dates(text: str) -> set[str]:
 # --------------------------------------------------------------------------
 
 
+# Spelled-out numbers. Recognised on the SOURCE side only -- see
+# ``canonical_values`` for why that asymmetry is deliberate.
+_NUMBER_WORDS: dict[str, int] = {
+    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+    "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
+    "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20,
+    "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70,
+    "eighty": 80, "ninety": 90, "hundred": 100,
+}
+_NUMBER_WORD_RE = re.compile(
+    r"\b(" + "|".join(sorted(_NUMBER_WORDS, key=len, reverse=True)) + r")\b", re.I
+)
+
+
+def word_quantities(text: str) -> set[str]:
+    """Numeric tokens for numbers written as words.
+
+    "four bytes" and "4 bytes" are the same fact. Without this, a claim citing
+    a source that spells the figure out is rejected for a difference in
+    typography.
+
+    A trailing percent marker is carried through, because "three percent" is a
+    percentage and must satisfy a ``pct:`` requirement rather than only a bare
+    count -- percentages and counts are deliberately different types here.
+    Both tokens are emitted rather than choosing: this is the source side, so
+    an extra token can only widen what a claim may match against.
+    """
+    out: set[str] = set()
+    for match in _NUMBER_WORD_RE.finditer(text):
+        value = _NUMBER_WORDS[match.group(1).lower()]
+        out.add(f"num:{value}")
+        tail = text[match.end() : match.end() + 12]
+        if _PCT_SUFFIX.match(tail.strip().split(" ")[0] if tail.strip() else ""):
+            out.add(f"pct:{value}")
+        # Magnitude written out after a word number: "four billion".
+        scale = re.match(r"\s+(million|billion|trillion|thousand|hundred)\b", tail, re.I)
+        if scale:
+            out.add(f"num:{value * MAGNITUDES.get(scale.group(1).lower(), 1)}")
+    return out
+
+
 def canonical_values(text: str) -> set[str]:
-    """All canonical value tokens in ``text`` -- the source-side view."""
-    return canonical_quantities(text) | canonical_dates(text)
+    """All canonical value tokens in ``text`` -- the source-side view.
+
+    Includes spelled-out numbers, which ``value_requirements`` deliberately
+    does not. The asymmetry is a safety property rather than an oversight:
+
+    * Widening what a source is understood to *contain* can only make
+      grounding more permissive, so no claim that previously verified can
+      start failing.
+    * Widening what a claim *requires* would do the opposite. "One of the
+      segments improved" would begin demanding the digit 1, and a source
+      saying "a segment improved" would newly fail -- inventing rejections
+      out of ordinary prose, since these words are far more often articles
+      and pronouns than quantities.
+
+    So "4 bytes" cited against "four bytes" now matches, while "four bytes"
+    as a claim adds no new obligation.
+    """
+    return canonical_quantities(text) | canonical_dates(text) | word_quantities(text)
 
 
 def value_requirements(text: str) -> list[set[str]]:

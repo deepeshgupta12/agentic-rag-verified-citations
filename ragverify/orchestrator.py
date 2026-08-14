@@ -864,9 +864,23 @@ class AdaptiveResearcher:
             self._warn("Web search returned no results (all backends failed or empty).", round_index)
             return []
 
+        # Truncation is collected and surfaced. A page cut mid-document still
+        # reads coherently, so an answer drawn from it looks complete while
+        # the section holding the fact was never fetched.
+        fetch_report: list[dict] = []
         pages = websearch.fetch_many(
-            results, self.settings, breaker=self.breaker, deadline=self.budget.deadline
+            results, self.settings, breaker=self.breaker,
+            deadline=self.budget.deadline, report=fetch_report,
         )
+        truncated = [r for r in fetch_report if r.get("truncated")]
+        if truncated:
+            worst = min(r["kept"] / r["total"] for r in truncated)
+            self._warn(
+                f"{len(truncated)} page(s) truncated at {self.settings.fetch_max_chars:,} chars "
+                f"(smallest fraction kept: {worst:.0%}); raise fetch_max_chars if an answer "
+                "seems to be missing.",
+                round_index,
+            )
         if not pages:
             self._warn("Could not fetch any result pages; falling back to search snippets.", round_index)
         return _web_evidence(results[: self.settings.web_max_results], pages, self.settings, start_index)
