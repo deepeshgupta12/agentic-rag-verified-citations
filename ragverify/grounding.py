@@ -29,7 +29,15 @@ from collections.abc import Iterable, Sequence
 
 from . import normalize
 from .retrieval import STOPWORDS, analyze
-from .schemas import AnswerAudit, Claim, EvidenceItem, GroundingReport
+from .schemas import (
+    AnswerAudit,
+    AnswerClaim,
+    AnswerClaimKind,
+    Claim,
+    EvidenceItem,
+    GroundingReport,
+    StructuredAnswer,
+)
 
 # Default share of a claim's content words that must appear in the cited
 # source. Tuned on the eval set in ``evals/``: lower admits paraphrase but
@@ -291,3 +299,110 @@ def strip_unsupported(answer: str, unsupported: Iterable[Claim]) -> str:
         if needle and needle in out:
             out = out.replace(needle, f"{needle} _[unverified]_")
     return out
+
+
+def verify_structured_answer(
+    answer: StructuredAnswer,
+    evidence: Sequence[EvidenceItem],
+    threshold: float = DEFAULT_OVERLAP_THRESHOLD,
+) -> tuple[list[AnswerClaim], AnswerAudit]:
+    """Verify a structured answer and return (verified claims, audit).
+
+    This replaces parsing prose. Parsing required guessing which sentences
+    were assertions, which were scaffolding, and which were disclosures, and
+    each guess was a way for unverified text to reach the reader:
+
+    * A word-count rule meant to exclude headings also excluded "The CEO
+      resigned in October." -- five words, uncited, and false.
+    * A regex meant to recognise gap disclosures matched any sentence
+      containing "did not", so "The CEO did not resign [S1]" skipped
+      verification entirely against a revenue document.
+
+    Neither hole exists here. Claim kind is declared by the model rather than
+    inferred, every assertion must carry a citation that independently
+    supports it, and the prose the reader sees is rendered from what survived.
+    """
+    by_id = {e.source_id: e for e in evidence}
+    verified: list[AnswerClaim] = []
+    unverified_text: list[str] = []
+    fabricated: list[str] = []
+    unsupported: list[str] = []
+    disclosures: list[str] = []
+
+    for claim in answer.claims:
+        resolved: list[EvidenceItem] = []
+        for cid in claim.citations:
+            canonical = cid if cid in by_id else _normalize_id(cid, by_id)
+            item = by_id.get(canonical)
+            if item is None:
+                fabricated.append(cid)
+            else:
+                resolved.append(item)
+
+        # A disclosure states that the sources do NOT establish something.
+        # It cannot be verified by overlap -- a source cannot contain words
+        # confirming what it omits -- but it must still name the sources that
+        # were examined, or it is an unsourced assertion wearing a label.
+        if claim.kind is AnswerClaimKind.DISCLOSURE:
+            if resolved:
+                disclosures.append(claim.text)
+                verified.append(claim.model_copy(
+                    update={"citations": [i.source_id for i in resolved]}
+                ))
+            else:
+                unverified_text.append(claim.text)
+            continue
+
+        if not claim.citations:
+            # An assertion with no citation is exactly the case the word-count
+            # heuristic let through.
+            unverified_text.append(claim.text)
+            continue
+
+        supporting = [
+            item.source_id for item in resolved
+            if claim_support(claim.text, item.text, threshold)[0]
+        ]
+        for item in resolved:
+            if item.source_id not in supporting:
+                unsupported.append(item.source_id)
+
+        if supporting:
+            verified.append(claim.model_copy(update={"citations": supporting}))
+        else:
+            unverified_text.append(claim.text)
+
+    audit = AnswerAudit(
+        verified_sentences=[c.text for c in verified if c.kind is AnswerClaimKind.ASSERTION],
+        unverified_sentences=unverified_text,
+        disclosure_sentences=disclosures,
+        fabricated_citations=sorted(set(fabricated)),
+        unsupported_citations=sorted(set(unsupported)),
+    )
+    return verified, audit
+
+
+def render_answer(claims: Sequence[AnswerClaim], lead: str = "") -> str:
+    """Render markdown from verified claims only.
+
+    Generated rather than model-written, so there is no uncited prose to
+    classify: every line the reader sees came through verification.
+    """
+    assertions = [c for c in claims if c.kind is AnswerClaimKind.ASSERTION]
+    disclosures = [c for c in claims if c.kind is AnswerClaimKind.DISCLOSURE]
+
+    lines: list[str] = []
+    if lead.strip():
+        lines += [lead.strip(), ""]
+
+    for claim in assertions:
+        cites = " ".join(f"[{c}]" for c in claim.citations)
+        lines.append(f"- {claim.text.rstrip('.')}. {cites}".rstrip())
+
+    if disclosures:
+        lines += ["", "**What this doesn't cover**", ""]
+        for claim in disclosures:
+            cites = " ".join(f"[{c}]" for c in claim.citations)
+            lines.append(f"- {claim.text.rstrip('.')}. {cites}".rstrip())
+
+    return "\n".join(lines).strip()

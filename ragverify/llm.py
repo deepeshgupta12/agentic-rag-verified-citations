@@ -24,7 +24,7 @@ from typing import Any, TypeVar
 from pydantic import BaseModel, ValidationError
 
 from . import jsonx
-from .budget import Budget
+from .budget import Budget, BudgetExceeded
 from .config import Settings
 from .schemas import Usage
 from .tokens import count_tokens, estimate_cost
@@ -154,21 +154,28 @@ class LLMClient:
         usage = getattr(response, "usage", None)
         prompt_tokens = getattr(usage, "prompt_tokens", None) or count_tokens(prompt_text)
         completion_tokens = getattr(usage, "completion_tokens", 0) or 0
+        cost = estimate_cost(prompt_tokens, completion_tokens, self.settings.price_per_million())
         self.usage = self.usage.add(
             Usage(
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
-                cost_usd=estimate_cost(prompt_tokens, completion_tokens, self.settings.price_per_million()),
+                cost_usd=cost,
                 calls=1,
             )
         )
-        self._sync_budget()
+        self._charge_budget(calls=1, cost_usd=cost)
 
-    def _sync_budget(self) -> None:
-        """Mirror usage into the shared budget after every billed call."""
+    def _charge_budget(self, calls: int, cost_usd: float) -> None:
+        """Record a DELTA against the shared budget.
+
+        Assigning cumulative client usage over the budget silently discarded
+        anything the orchestrator had recorded directly -- search and fetch
+        calls vanished the moment the next model call synced. The budget is
+        the single source of truth and only ever accumulates; the client
+        reports what it just spent rather than what it has spent in total.
+        """
         if self.budget is not None:
-            self.budget.calls = self.usage.calls
-            self.budget.cost_usd = self.usage.cost_usd
+            self.budget.record(calls=calls, cost_usd=cost_usd)
 
     # ------------------------------------------------------------------
     # Structured output
@@ -238,6 +245,11 @@ class LLMClient:
         for start in range(0, len(texts), batch_size):
             if self.budget is not None:
                 self.budget.check()
+                # A request started near the deadline could otherwise run for
+                # its full timeout past the cap.
+                remaining = self.budget.remaining_seconds
+                if remaining <= 0:
+                    raise BudgetExceeded("run deadline passed before embedding")
             batch = [t or " " for t in texts[start : start + batch_size]]
             response = self._client.embeddings.create(model=self.settings.embed_model, input=batch)
             vectors.extend(item.embedding for item in response.data)
@@ -246,12 +258,9 @@ class LLMClient:
             # Embeddings are billed and were being counted as free, so a run
             # that indexed a large corpus under-reported its own spend and
             # could pass a cost cap it had already exceeded.
+            cost = estimate_cost(prompt_tokens, 0, self.settings.embed_price_per_million())
             self.usage = self.usage.add(
-                Usage(
-                    prompt_tokens=prompt_tokens,
-                    cost_usd=estimate_cost(prompt_tokens, 0, self.settings.embed_price_per_million()),
-                    calls=1,
-                )
+                Usage(prompt_tokens=prompt_tokens, cost_usd=cost, calls=1)
             )
-            self._sync_budget()
+            self._charge_budget(calls=1, cost_usd=cost)
         return vectors

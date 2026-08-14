@@ -5,7 +5,7 @@
 [![CI](https://github.com/deepeshgupta12/agentic-rag-verified-citations/actions/workflows/ci.yml/badge.svg)](https://github.com/deepeshgupta12/agentic-rag-verified-citations/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-373%20passing-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-379%20passing-brightgreen)](tests/)
 
 *Agentic RAG · citation verification · NLI entailment · hallucination resistance · self-correcting retrieval · multi-hop*
 
@@ -55,7 +55,7 @@ Three checks in series, each catching what the previous cannot:
 
 1. **Lexical grounding** — deterministic and free. Does the cited passage contain the claim's words and figures? Catches fabricated citations, irrelevant sources, invented numbers. Cannot be argued out of its verdict by a confident draft.
 2. **Entailment** — optional, semantic. Does the passage *mean* what the claim says? Catches "most"→"all", negation, scope, modality, attribution.
-3. **Answer audit** — deterministic. Is the final text itself supported, sentence by sentence?
+3. **Answer audit** — deterministic. The synthesizer returns *claims*, each is verified per-citation, and the prose you read is rendered from what survived. Nothing is parsed out of model-written text, so there is no sentence to misclassify as a heading, a disclosure or an assertion.
 
 Grounding can overrule the verifier:
 
@@ -220,7 +220,7 @@ Live evals run on manual dispatch, on PRs labelled `run-evals`, and weekly. The 
 
 ```bash
 pip install -e ".[dev]"
-pytest                    # 373 tests, no API key, no network
+pytest                    # 379 tests, no API key, no network
 ```
 
 Tests run against a scripted fake LLM that *subclasses the real client*, so retries, usage accounting and the structured-output path are exercised rather than stubbed.
@@ -264,6 +264,7 @@ Deeper notes in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Limitations
 
+- **Disclosures are declared, not detected.** A claim marked as a gap ("the sources do not give a 2027 forecast") is checked for a real citation but cannot be checked for content — a source cannot contain words confirming what it omits. A model that mislabels an assertion as a disclosure can still place it under "What this doesn't cover", where it reads as a gap rather than a fact but is still text the reader sees.
 - **The advanced stages are opt-in.** Entailment, reranking and multi-hop are off by default, so a stock configuration runs lexical grounding plus the answer audit. Enable them for higher assurance at roughly 2–4× latency.
 - **With entailment off (the default), grounding is recall-based.** "Most regions" cited for "all regions" still passes. Turn it on with `use_entailment=True` for the semantic check.
 - **Entailment is itself a model judgement** and can be wrong. It only ever *downgrades* — a claim rejected lexically is never revived — so enabling it cannot make the pipeline accept something it previously refused.

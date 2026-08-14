@@ -227,6 +227,7 @@ class AdaptiveResearcher:
         # rendering. The content is verified, but generation proved
         # unreliable, and confidence should say so.
         self.synthesis_degraded = False
+        self._last_verifier: VerifierReport | None = None
         # Latest web source-quality assessment, surfaced on the result.
         self.quality: sourcequality.QualityReport | None = None
         # Evidence gathered by multi-hop, merged into the main loop so the
@@ -409,6 +410,7 @@ class AdaptiveResearcher:
             )
 
             verifier = self._verify(question, draft, grounding, route, index)
+            self._last_verifier = verifier
             tracer.emit(
                 EventKind.VERIFY,
                 f"Round {index}: verdict={verifier.verdict.value}, next={verifier.next_action.value}",
@@ -627,10 +629,12 @@ class AdaptiveResearcher:
         )
 
     def _sync_budget(self) -> None:
-        """Mirror the client's usage into the budget tracker."""
-        usage = self.client.usage
-        self.budget.calls = usage.calls
-        self.budget.cost_usd = usage.cost_usd
+        """No-op: the budget accumulates deltas and is authoritative.
+
+        Copying cumulative client usage over it discarded every call the
+        orchestrator had recorded directly -- search and fetch disappeared the
+        moment the next model call synced.
+        """
 
     # ------------------------------------------------------------------
     # Steps
@@ -1090,6 +1094,17 @@ class AdaptiveResearcher:
         answer = ""
         audit: AnswerAudit | None = None
 
+        # Structured synthesis: the model returns claims and the prose is
+        # rendered here. Parsing prose meant guessing which sentences were
+        # assertions, which were headings and which were gap disclosures, and
+        # every guess was a hole -- a five-word uncited sentence passed a
+        # word-count rule, and any sentence containing "did not" skipped
+        # verification through a disclosure regex. Neither is expressible now.
+        if self.settings.structured_synthesis:
+            structured = self._structured_answer(prompt, evidence, grounding)
+            if structured is not None:
+                return structured
+
         # The synthesis prompt is a request, not a constraint. Audit the text
         # that actually comes back, and give the model one corrective turn
         # before falling back to something deterministic.
@@ -1156,6 +1171,58 @@ class AdaptiveResearcher:
             audit = grounding_mod.verify_answer(answer, evidence)
 
         return answer, self._confidence(grounding, verifier, audit), audit
+
+    def _structured_answer(self, prompt, evidence, grounding):
+        """Synthesize as claims, verify each, render what survives.
+
+        Returns ``(answer, confidence, audit)`` or None to fall back.
+        """
+        from .schemas import StructuredAnswer
+
+        for attempt in range(2):
+            try:
+                structured = self.client.structured(
+                    agents.STRUCTURED_SYNTHESIZER_SYSTEM, prompt, StructuredAnswer
+                )
+            except (LLMError, SchemaError, BudgetExceeded) as exc:
+                self._warn(f"Structured synthesis unavailable ({exc}).")
+                return None
+
+            verified, audit = grounding_mod.verify_structured_answer(structured, evidence)
+            self.tracer.emit(
+                EventKind.VERIFY,
+                f"Answer claims: {len(audit.verified_sentences)} verified, "
+                f"{len(audit.unverified_sentences)} rejected"
+                + (f", fabricated {audit.fabricated_citations}" if audit.fabricated_citations else ""),
+                data={"verified_rate": audit.verified_rate},
+            )
+
+            if audit.is_clean or attempt == 1:
+                if not verified:
+                    self.synthesis_degraded = True
+                    return self._render_claims(grounding), "low", audit
+                if not audit.is_clean:
+                    # Rejected claims are dropped rather than shipped. The
+                    # rendered answer therefore contains only what verified.
+                    self.synthesis_degraded = True
+                    self._warn(
+                        f"{len(audit.unverified_sentences)} answer claim(s) failed "
+                        "verification and were removed."
+                    )
+                    _, audit = grounding_mod.verify_structured_answer(
+                        StructuredAnswer(claims=verified, lead=structured.lead), evidence
+                    )
+                return (
+                    grounding_mod.render_answer(verified, structured.lead),
+                    self._confidence(grounding, self._last_verifier, audit),
+                    audit,
+                )
+
+            self._warn(
+                f"Answer claims failed verification "
+                f"({len(audit.unverified_sentences)} rejected); regenerating."
+            )
+        return None
 
     @staticmethod
     def _render_claims(grounding: GroundingReport) -> str:

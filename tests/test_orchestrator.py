@@ -17,11 +17,14 @@ from ragverify.ingest import Document
 from ragverify.llm import LLMClient, LLMError
 from ragverify.orchestrator import AdaptiveResearcher, Corpus
 from ragverify.schemas import (
+    AnswerClaim,
+    AnswerClaimKind,
     Claim,
     NextAction,
     Outcome,
     ResearchDraft,
     Route,
+    StructuredAnswer,
     TriageDecision,
     Verdict,
     VerifierReport,
@@ -126,10 +129,24 @@ GOOD_DRAFT = draft("European revenue grew 34% year over year", ["S1"])
 
 QUESTION = "How did European revenue change this quarter?"
 
-# Synthesis output must carry a citation: an uncited answer cannot be verified
-# and is now rejected, so a bare "Final." stub no longer represents a
-# successful run.
-CITED_ANSWER = "European revenue grew 34% year over year [S1]."
+# Synthesis returns CLAIMS now, not prose: the answer is rendered from what
+# verifies. A bare string no longer represents a successful synthesis.
+def answer_claims(*claims) -> StructuredAnswer:
+    """Build a structured synthesis result for the scripted client."""
+    return StructuredAnswer(claims=list(claims))
+
+
+def assertion(text: str, *citations: str) -> AnswerClaim:
+    return AnswerClaim(text=text, kind=AnswerClaimKind.ASSERTION, citations=list(citations))
+
+
+def disclosure(text: str, *citations: str) -> AnswerClaim:
+    return AnswerClaim(text=text, kind=AnswerClaimKind.DISCLOSURE, citations=list(citations))
+
+
+CITED_ANSWER = answer_claims(
+    assertion("European revenue grew 34% year over year", "S1")
+)
 
 
 # ---------------------------------------------------------------------------

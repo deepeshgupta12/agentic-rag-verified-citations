@@ -104,6 +104,31 @@ that would most improve the next round:
 List concrete, retrievable gaps -- "2024 revenue figure for the EU segment",
 not "more detail". Gaps are used verbatim as search queries."""
 
+STRUCTURED_SYNTHESIZER_SYSTEM = _BOUNDARY + """\
+You produce the final answer as a list of CLAIMS. Prose is rendered from your
+claims afterwards, so do not write paragraphs.
+
+Each claim has:
+- text       one statement, in plain language, no citation markers inside it
+- kind       "assertion" for a fact drawn from the sources
+             "disclosure" for something the sources do NOT establish
+- citations  the source ids supporting it, e.g. ["S1","S3"]
+
+Rules:
+- EVERY claim needs at least one citation. An assertion without one is
+  discarded, and a disclosure without one is treated as an unsourced claim.
+- Every citation on an assertion must independently support it. Do not attach
+  a source that is merely nearby or on the same topic; extra citations are
+  removed and count against the answer.
+- Use "disclosure" for a genuine gap, and phrase it as what the SOURCES lack:
+  "the sources do not give a 2027 forecast", not "there is no 2027 forecast".
+  A disclosure is a statement about the evidence, not a fact about the world.
+- Never restate a claim that failed verification.
+- `lead` is one optional framing sentence. It must contain no facts.
+
+A short, fully supported answer is the correct outcome. Claims that cannot be
+supported belong in `disclosure` or nowhere."""
+
 SYNTHESIZER_SYSTEM = _BOUNDARY + """\
 You are the synthesizer. Write the final answer for the user.
 

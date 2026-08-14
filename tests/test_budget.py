@@ -386,3 +386,46 @@ class TestBudgetCoversEveryExternalCall:
         )
         websearch.search("q", Settings(), deadline=time.monotonic() - 1)
         assert not attempted, "a passed deadline must stop the search ladder"
+
+
+class TestBudgetIsAuthoritative:
+    """The budget accumulates deltas; it is never assigned from client usage.
+
+    Assigning cumulative usage over it discarded everything the orchestrator
+    had recorded directly, so search and fetch calls vanished the moment the
+    next model call synced.
+    """
+
+    def test_http_calls_survive_a_later_model_call(self):
+        budget = Budget(max_calls=10)
+        budget.record(calls=3)                  # search + fetch
+        budget.record(calls=1, cost_usd=0.01)   # a model call, as a delta
+
+        assert budget.calls == 4, "recorded HTTP calls must not be overwritten"
+        assert budget.cost_usd == pytest.approx(0.01)
+
+    def test_orchestrator_sync_does_not_reset(self):
+        import sys
+
+        sys.path.insert(0, "tests")
+        from test_orchestrator import corpus_for, settings
+
+        from ragverify.orchestrator import AdaptiveResearcher
+
+        cfg = settings()
+        researcher = AdaptiveResearcher(cfg, _StubClient(), corpus_for(cfg))
+        researcher.budget.record(calls=5, cost_usd=0.2)
+        researcher._sync_budget()
+
+        assert researcher.budget.calls == 5, "_sync_budget must not clobber deltas"
+        assert researcher.budget.cost_usd == pytest.approx(0.2)
+
+
+class _StubClient:
+    budget = None
+    usage = None
+
+    def __init__(self):
+        from ragverify.schemas import Usage
+
+        self.usage = Usage()

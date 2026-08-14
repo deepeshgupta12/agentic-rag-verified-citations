@@ -262,13 +262,15 @@ class TestFinalAnswerVerification:
         assert result.answer_audit is not None
 
     def test_failed_answer_triggers_one_regeneration(self):
+        from test_orchestrator import answer_claims, assertion
+
         cfg = settings(max_rounds=1)
         llm = FakeLLM(cfg, [
             triage(),
             GOOD_DRAFT,
             verdict(Verdict.SUFFICIENT, NextAction.ANSWER),
-            "Revenue fell 80% [S42].",                                    # fails
-            "European revenue grew 34% year over year [S1].",             # corrected
+            answer_claims(assertion("Revenue fell 80%", "S42")),          # fails
+            CITED_ANSWER,                                                  # corrected
         ])
         result = AdaptiveResearcher(cfg, llm, corpus_for(cfg)).run(QUESTION)
 
@@ -277,14 +279,20 @@ class TestFinalAnswerVerification:
         assert any("failed verification" in w for w in result.warnings)
 
     def test_clean_answer_passes_untouched(self):
+        """A verified claim is rendered verbatim into the answer."""
+        from test_orchestrator import answer_claims, assertion
+
         cfg = settings(max_rounds=1)
-        honest = "European revenue grew 34% year over year to 2.1 billion euro [S1]."
+        honest = answer_claims(
+            assertion("European revenue grew 34% year over year to 2.1 billion euro", "S1")
+        )
         llm = FakeLLM(cfg, [
             triage(), GOOD_DRAFT, verdict(Verdict.SUFFICIENT, NextAction.ANSWER), honest,
         ])
         result = AdaptiveResearcher(cfg, llm, corpus_for(cfg)).run(QUESTION)
 
-        assert result.final_answer == honest
+        assert "European revenue grew 34%" in result.final_answer
+        assert "[S1]" in result.final_answer
         assert result.answer_audit.verified_rate == 1.0
         assert result.confidence == "high"
 
@@ -413,16 +421,88 @@ class TestReleaseGateFailsClosed:
 
     def test_clean_answer_still_ships_unchanged(self):
         """The gate must not reject correct answers."""
-        result = self._run("European revenue grew 34% year over year [S1].")
+        result = self._run(CITED_ANSWER)
         assert result.outcome is Outcome.ANSWERED
         assert result.answer_audit.is_clean
         assert "34%" in result.final_answer
 
-    def test_headings_and_disclosures_do_not_fail_the_gate(self):
-        result = self._run(
-            "## Summary\n"
-            "European revenue grew 34% year over year [S1].\n"
-            "The 2027 forecast is not provided in the sources [S1]."
-        )
+    def test_disclosures_do_not_fail_the_gate(self):
+        """A declared gap is not an unverified assertion."""
+        from test_orchestrator import answer_claims, assertion, disclosure
+
+        result = self._run(answer_claims(
+            assertion("European revenue grew 34% year over year", "S1"),
+            disclosure("the sources do not give a 2027 forecast", "S1"),
+        ))
         assert result.outcome is Outcome.ANSWERED
         assert result.answer_audit.is_clean
+        assert "doesn't cover" in result.final_answer
+
+
+class TestStructuredSynthesisClosesTheHeuristicHoles:
+    """The reported boundary cases, verbatim.
+
+    Both survived a heuristic fix. The regression test written for the first
+    one used a *longer* sentence than the reported case, so it confirmed the
+    fix rather than testing it — which is how the hole stayed open.
+    """
+
+    def _run(self, structured):
+        cfg = settings(max_rounds=1)
+        llm = FakeLLM(cfg, [
+            triage(), GOOD_DRAFT, verdict(Verdict.SUFFICIENT, NextAction.ANSWER),
+            structured, structured,
+        ])
+        return AdaptiveResearcher(cfg, llm, corpus_for(cfg)).run(QUESTION)
+
+    def test_five_word_uncited_assertion_is_rejected(self):
+        """'The CEO resigned in October.' — five words, under the old cutoff."""
+        from test_orchestrator import answer_claims, assertion
+
+        from ragverify.schemas import AnswerClaim
+
+        result = self._run(answer_claims(
+            assertion("European revenue grew 34%", "S1"),
+            AnswerClaim(text="The CEO resigned in October"),  # no citations
+        ))
+        assert "CEO resigned" not in result.final_answer
+        assert result.outcome is Outcome.PARTIAL
+
+    def test_negative_claim_must_still_verify(self):
+        """'The CEO did not resign [S1]' skipped verification via a regex."""
+        from test_orchestrator import answer_claims, assertion
+
+        result = self._run(answer_claims(
+            assertion("The CEO did not resign", "S1"),  # S1 is a revenue passage
+        ))
+        assert "did not resign" not in result.final_answer
+
+    def test_disclosure_needs_a_source(self):
+        """A disclosure with no citation is an unsourced claim with a label."""
+        from test_orchestrator import answer_claims
+
+        from ragverify.schemas import AnswerClaim, AnswerClaimKind
+
+        result = self._run(answer_claims(
+            AnswerClaim(text="the sources do not mention the CEO",
+                        kind=AnswerClaimKind.DISCLOSURE),
+        ))
+        assert "do not mention the CEO" not in result.final_answer
+
+    def test_no_word_count_rule_remains(self):
+        """Length must not decide whether a statement needs verifying."""
+        from ragverify.grounding import verify_structured_answer
+        from ragverify.schemas import (
+            AnswerClaim,
+            EvidenceItem,
+            Route,
+            StructuredAnswer,
+        )
+
+        ev = [EvidenceItem(source_id="S1", label="a",
+                           text="European revenue grew 34%.", origin=Route.LOCAL)]
+        for text in ["Profits fell.", "The CEO quit.", "It doubled."]:
+            _, audit = verify_structured_answer(
+                StructuredAnswer(claims=[AnswerClaim(text=text)]), ev
+            )
+            assert not audit.is_clean, f"{text!r} passed without a citation"

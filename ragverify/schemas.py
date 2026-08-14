@@ -153,6 +153,44 @@ class Claim(BaseModel):
     citations: list[str] = Field(default_factory=list)
 
 
+class AnswerClaimKind(str, Enum):
+    """What a final-answer claim asserts, declared rather than inferred.
+
+    Inferring this from prose was the defect. A regex looking for "did not"
+    classified any negative sentence as a disclosure and skipped verification,
+    so "The CEO did not resign [S1]" passed against a revenue document. The
+    model now states which it is, and each kind is checked by its own rule.
+    """
+
+    ASSERTION = "assertion"    # a fact from the sources; must verify
+    DISCLOSURE = "disclosure"  # what the sources do NOT establish
+
+
+class AnswerClaim(BaseModel):
+    """One statement in the final answer, with its sources.
+
+    The final answer is assembled from these rather than parsed out of prose.
+    Parsing meant guessing which sentences were assertions, which were
+    headings, and which were disclosures -- and every guess was a way for
+    unverified text to reach the reader. A five-word uncited sentence slipped
+    through a word-count heuristic; that class of hole cannot exist when the
+    prose is generated from verified objects.
+    """
+
+    text: str
+    kind: AnswerClaimKind = AnswerClaimKind.ASSERTION
+    citations: list[str] = Field(default_factory=list)
+
+
+class StructuredAnswer(BaseModel):
+    """The synthesizer's output: claims, not prose."""
+
+    claims: list[AnswerClaim] = Field(default_factory=list)
+    # Optional one-line framing. Rendered verbatim and never treated as a
+    # factual claim, so it may not contain assertions.
+    lead: str = Field(default="", max_length=200)
+
+
 class ResearchDraft(BaseModel):
     claims: list[Claim] = Field(default_factory=list)
     draft_answer: str = ""

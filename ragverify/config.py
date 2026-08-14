@@ -167,6 +167,12 @@ class Settings:
     # the case lexical grounding was already waving through.
     entailment_strict: bool = True
 
+    # Synthesize the final answer as verified claims and render prose from
+    # them, instead of parsing prose the model wrote. Parsing required
+    # classifying sentences as assertion, heading or disclosure, and each
+    # classification was a way for unverified text to reach the reader.
+    structured_synthesis: bool = True
+
     # --- safety ----------------------------------------------------------
     # Neutralize model-directed instructions found in retrieved text. Uploaded
     # files and fetched pages are attacker-controllable input.
