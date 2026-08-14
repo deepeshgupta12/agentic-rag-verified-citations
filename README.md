@@ -151,6 +151,21 @@ Precision is preferred to recall: a false contradiction discredits every real on
 ### Every displayed citation is checked independently
 A claim citing `[S1][S2]` keeps only the sources that actually carry it — accepting it because *any* citation supports it would show the reader an unrelated document as evidence. This holds for the research draft and for the final answer, which were separate code paths and had to be fixed separately.
 
+### Table rows are chunks, and they carry their headers
+A citation to `q3.pdf p.3` is not checkable when the fact is one cell of a
+forty-row table. Worse, paragraph chunking splits a table wherever the token
+budget lands, so a chunk can hold `Eastern 250 9% 190` with the header row
+several chunks away — retrievable, *groundable* because the digits are there,
+and meaningless, since nothing says whether 250 is revenue or headcount.
+
+Rows are chunked individually and rendered as `Segment: Eastern | Revenue: 250
+| Margin: 9%`, so a row is self-describing wherever it lands, and its citation
+reads `q3.pdf p.3 table 1 row 3`.
+
+Detection is conservative — three rows, two columns, consistent widths. A
+false table fragments prose into cells and wrecks retrieval for that passage,
+which costs far more than missing a real one.
+
 ### Web sources are ranked, never silently dropped
 Publisher class, recency (half-life chosen by whether the question asks for current information), domain diversity, and cross-domain corroboration. Corroboration counts *registrable domains*, so five pages from one site are one source wearing five hats. Nothing is discarded — a weak source that is the only one answering the question is still the answer.
 
@@ -171,6 +186,46 @@ Every external call — LLM, embedding, search, fetch — is metered against one
 
 ---
 
+### Access control and audit
+
+Every other check protects you from a *wrong* answer. Access control protects
+you from a **correct** answer drawn from a document you were never allowed to
+see — the failure a verification pipeline makes worse, since the answer
+arrives grounded, cited and confidently supported by a source you have no
+right to.
+
+```python
+from ragverify.access import AccessPolicy, DocumentACL, Principal
+
+policy = AccessPolicy([
+    DocumentACL(doc_name="q3.pdf", tenant="acme", tenant_readable=True),
+    DocumentACL(doc_name="board.pdf", tenant="acme", allow_roles=frozenset({"exec"})),
+])
+corpus = Corpus(docs, settings, client, principal=alice, policy=policy)
+```
+
+Two properties, both deliberate. **Deny by default** — a document with no ACL
+is unclassified, not public, so an ingestion mistake cannot become a
+disclosure. And **filtering happens at the index, before scoring**:
+post-filtering a ranked list leaks through the ranking itself, since result
+counts and orderings are computed over documents you cannot read.
+
+Tenant isolation is not overridable by role. A global `admin` cannot read
+across a tenant boundary, or the boundary is decorative.
+
+`audit.py` writes an append-only, hash-chained log of who asked what and which
+documents answered. The verifier reports **where** a chain breaks, not merely
+that it did — someone reading it in a dispute needs to know which records
+still hold. Questions are hashed rather than stored: a question is often
+sensitive in itself, and a log that quotes it becomes a second copy of what
+the ACLs were protecting.
+
+Tamper-*evident*, not tamper-proof: anyone who can rewrite the file can
+recompute the chain. Real integrity needs an append-only store the writer
+cannot rewrite. Identity is **not** handled here — `ragverify` decides what a
+given principal may read; establishing who they are belongs to your
+application.
+
 ## Configuration
 
 | Setting | Default | Purpose |
@@ -183,6 +238,7 @@ Every external call — LLM, embedding, search, fetch — is metered against one
 | `use_multi_hop` | `False` | Chained retrieval for genuinely sequential questions |
 | `assess_source_quality` | `True` | Rank and warn on web evidence |
 | `detect_contradictions` | `True` | Find cross-source disagreements mechanically |
+| `resolve_contradictions` | `True` | Rank conflicting sources by standing; both sides always reported |
 | `cache_embeddings` | `True` | Content-hash cache — **146× faster** on a warm corpus |
 | `sanitize_sources` | `True` | Neutralise injections in retrieved text |
 | `max_cost_usd` / `max_seconds` / `max_calls` | 1.00 / 180 / 40 | Hard caps, per run |
@@ -314,6 +370,10 @@ ragverify/
 ├── rerank.py         cross-encoder / LLM reranking
 ├── sourcequality.py  authority, freshness, diversity, corroboration
 ├── contradiction.py  cross-source value and polarity conflicts
+├── resolution.py     ranks conflicting sources, never picks for you
+├── tables.py         table detection, row-level provenance
+├── access.py         tenant isolation and document ACLs
+├── audit.py          append-only hash-chained audit log
 ├── retrieval.py      BM25 + dense + RRF + MMR
 ├── sanitize.py       untrusted-source boundary
 ├── budget.py         caps, deadline, circuit breaker
