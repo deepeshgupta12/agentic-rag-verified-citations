@@ -41,6 +41,7 @@ from . import entailment as entailment_mod
 from . import grounding as grounding_mod
 from . import planner as planner_mod
 from . import rerank as rerank_mod
+from . import resolution as resolution_mod
 from . import store as store_mod
 from .budget import Budget, BudgetExceeded, CircuitBreaker
 from .config import Settings
@@ -236,6 +237,7 @@ class AdaptiveResearcher:
         self._hop_evidence: list[EvidenceItem] = []
         # Cross-source disagreements found this run.
         self.contradictions: list = []
+        self.resolutions: list = []
         # Append-only audit trail. Built during the run so it captures each
         # passage as it was actually used, including the pre-sanitisation body.
         self.ledger: EvidenceLedger | None = None
@@ -373,6 +375,11 @@ class AdaptiveResearcher:
                 if conflicts:
                     self.contradictions = conflicts
                     self._warn(contradiction_mod.summarize(conflicts), index)
+                    if settings.resolve_contradictions:
+                        self.resolutions = resolution_mod.resolve(
+                            conflicts, evidence, question, self.quality
+                        )
+                        self._warn(resolution_mod.summarize(self.resolutions), index)
                     for conflict in conflicts[:3]:
                         self.tracer.emit(
                             EventKind.WARNING, conflict.describe(), index,
@@ -544,6 +551,16 @@ class AdaptiveResearcher:
                     "description": c.describe(), "overlap": c.overlap,
                 }
                 for c in self.contradictions
+            ],
+            resolutions=[
+                {
+                    "sources": [st.source_id for st in r.ranked],
+                    "decisive": r.decisive, "margin": r.margin,
+                    "preferred": r.preferred.source_id if r.preferred else None,
+                    "description": r.describe(),
+                    "standing": {st.source_id: st.score for st in r.ranked},
+                }
+                for r in self.resolutions
             ],
             source_quality=(
                 {
@@ -1117,7 +1134,11 @@ class AdaptiveResearcher:
         prompt = agents.synthesis_prompt(
             question, grounding, evidence, verifier,
             self.settings.evidence_token_budget,
-            contradictions=contradiction_mod.as_prompt_block(self.contradictions),
+            contradictions=(
+                resolution_mod.as_prompt_block(self.resolutions)
+                if self.resolutions
+                else contradiction_mod.as_prompt_block(self.contradictions)
+            ),
         )
 
         answer = ""

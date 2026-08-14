@@ -180,6 +180,10 @@ class Settings:
     # fully verified answer built on whichever ranked first.
     detect_contradictions: bool = True
     contradiction_min_overlap: float = 0.22
+    # Rank conflicting sources by corroboration, authority, recency and
+    # specificity. Ranking only: both sides are always reported, because a
+    # silently chosen side is indistinguishable from sources that agreed.
+    resolve_contradictions: bool = True
 
     # --- safety ----------------------------------------------------------
     # Neutralize model-directed instructions found in retrieved text. Uploaded

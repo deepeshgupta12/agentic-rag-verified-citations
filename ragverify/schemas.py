@@ -423,6 +423,9 @@ class ResearchResult(BaseModel):
     # that vary by corpus, and a silently chosen side is indistinguishable
     # from a verified fact.
     contradictions: list[dict[str, Any]] = Field(default_factory=list)
+    # Conflicts ranked by source standing. A ranking, never a deletion: both
+    # sides stay in the answer so the reader can see a disagreement existed.
+    resolutions: list[dict[str, Any]] = Field(default_factory=list)
     budget: dict[str, float] = Field(default_factory=dict)
     elapsed_s: float = 0.0
 
