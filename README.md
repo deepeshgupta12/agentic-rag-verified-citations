@@ -24,6 +24,8 @@ The citation is produced by the same model that wrote the claim, in the same bre
 | **Invented number** | Source says 34%, answer says 47%, everything else matches |
 | **Over-generalisation** | Source says "most regions", answer says "all regions" |
 | **Attribution slip** | Source says "the CEO claimed X", answer states X as fact |
+| **Uncited assertion** | A sentence with no citation, sitting among cited ones |
+| **Riding citation** | `[S1][S2]` where only S1 supports the claim, but both are shown |
 
 The usual mitigation is a "verifier" agent asked whether the evidence is sufficient. That check is almost always decorative: the pipeline calls it, receives `{"verdict": "insufficient"}`, and writes the answer anyway, because nothing in the control flow reads the verdict.
 
@@ -44,18 +46,28 @@ The usual mitigation is a "verifier" agent asked whether the evidence is suffici
    │     └────────── escalate: widen · rephrase · web ──────────────┘   │
    └─────────────────────────────────┬──────────────────────────────────┘
                                      ▼
-                          synthesize ─► AUDIT THE ANSWER
+                      synthesize AS CLAIMS ─► verify each ─► RENDER
                                             │
-                                  fails ────┴──► regenerate ──► render
-                                                                verified
-              answer │ partial │ abstain │ budget-stopped        claims
+                                  fails ────┴──► regenerate, then
+                                                 render only what verified
+
+              answer │ partial │ abstain │ clarify │ budget-stopped
 ```
 
 Three checks in series, each catching what the previous cannot:
 
 1. **Lexical grounding** — deterministic and free. Does the cited passage contain the claim's words and figures? Catches fabricated citations, irrelevant sources, invented numbers. Cannot be argued out of its verdict by a confident draft.
 2. **Entailment** — optional, semantic. Does the passage *mean* what the claim says? Catches "most"→"all", negation, scope, modality, attribution.
-3. **Answer audit** — deterministic. The synthesizer returns *claims*, each is verified per-citation, and the prose you read is rendered from what survived. Nothing is parsed out of model-written text, so there is no sentence to misclassify as a heading, a disclosure or an assertion.
+3. **Answer gate** — deterministic. The synthesizer returns *claims*, not prose. Each is verified per-citation and the answer you read is **rendered** from what survived.
+
+That last point is structural rather than cosmetic. Parsing an answer out of model-written prose means classifying every sentence as an assertion, a heading or a gap disclosure — and each classification is a way for unverified text to reach the reader. Two real examples, both closed by generating the prose instead:
+
+| Prose that slipped through | Why |
+|---|---|
+| `The CEO resigned in October.` | Five words — under a word-count rule meant to exclude headings |
+| `The CEO did not resign [S1].` | Matched a "did not" disclosure pattern, so it skipped verification entirely |
+
+Claim kind is now **declared by the model, not inferred from wording**, and there is no uncited prose because the prose is generated here.
 
 Grounding can overrule the verifier:
 
@@ -129,6 +141,9 @@ Stable chunk ids, page numbers, URLs. Web results are fetched and extracted, not
 
 The ledger records a content hash and snapshot of every passage **both before and after sanitisation** — grounding checks the sanitised text, so an audit needs both — plus one claim→source edge per citation carrying its verdict: `supported`, `dropped` (real passage, does not support) or `fabricated` (never retrieved). Only the last is a hallucination, and a flat list of surviving ids collapses all three into one.
 
+### Every displayed citation is checked independently
+A claim citing `[S1][S2]` keeps only the sources that actually carry it — accepting it because *any* citation supports it would show the reader an unrelated document as evidence. This holds for the research draft and for the final answer, which were separate code paths and had to be fixed separately.
+
 ### Web sources are ranked, never silently dropped
 Publisher class, recency (half-life chosen by whether the question asks for current information), domain diversity, and cross-domain corroboration. Corroboration counts *registrable domains*, so five pages from one site are one source wearing five hats. Nothing is discarded — a weak source that is the only one answering the question is still the answer.
 
@@ -163,7 +178,8 @@ Every external call — LLM, embedding, search, fetch — is metered against one
 | `cache_embeddings` | `True` | Content-hash cache — **146× faster** on a warm corpus |
 | `sanitize_sources` | `True` | Neutralise injections in retrieved text |
 | `max_cost_usd` / `max_seconds` / `max_calls` | 1.00 / 180 / 40 | Hard caps, per run |
-| `fetch_max_chars` | 20,000 | Characters kept per fetched page; truncation is reported |
+| `fetch_max_chars` | 20000 | Characters kept per fetched page; truncation is reported |
+| `structured_synthesis` | `True` | Return the answer as verified claims and render prose from them |
 
 **Raise `max_seconds` when enabling the optional stages.** A single question
 with reranking and entailment takes roughly 110 seconds, so the 180-second
@@ -183,9 +199,13 @@ Optional extras: `pip install ragverify[rerank]` (cross-encoder), `ragverify[ote
 ## Evaluation
 
 ```bash
-python evals/run_eval.py --out baseline.json
-python evals/run_eval.py --baseline baseline.json --compare   # non-zero on regression
+python evals/run_eval.py --out results.json          # one run
+python evals/compare.py results.json baseline.json   # non-zero on regression
 ```
+
+**There is no committed baseline.** One existed and was removed: it covered 13 cases against a 25-case dataset at a 61.5% pass rate, so it compared unlike samples and enshrined failures. A wrong gate is worse than no gate, because it reports that quality was enforced when nothing was checked. Generate your own with `--out baseline.json` after a full run on your configuration.
+
+Comparison is a separate script deliberately. Re-running the suite to compare would double the cost and, with a nondeterministic model, compare a *different sample* against the baseline — so ordinary variance reads as regression. `compare.py` reads the results already produced and refuses outright when the baseline covers a different number of cases.
 
 **25 cases across 9 domains**: finance, contradictions between sources, tabular data, temporal (superseded facts), multilingual, OCR-damaged scans, multi-hop, adversarial/poisoned corpora, and low-authority sources.
 
